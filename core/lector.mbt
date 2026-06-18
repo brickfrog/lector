@@ -10,6 +10,22 @@
 // the operations as one call surface.
 
 ///|
+/// PDF spans -> cleaned, reflowed paragraphs (body text only). Spans come from
+/// the host (pdf.js / PyMuPDF) as { text, size, x, y }.
+pub fn page_paragraphs(
+  spans : Array[@clean.Span],
+  body_min_size : Double,
+) -> Array[String] {
+  @clean.page_paragraphs(spans, body_min_size)
+}
+
+///|
+/// Auto-detect the dominant (body) font size from spans.
+pub fn detect_body_size(spans : Array[@clean.Span]) -> Double {
+  @clean.detect_body_size(spans)
+}
+
+///|
 /// Greedy-pack paragraphs into <= max_chars chunks (whole paragraphs only).
 pub fn pack(paras : Array[String], max_chars : Int) -> Array[String] {
   @chunk.pack(paras, max_chars)

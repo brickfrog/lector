@@ -16,6 +16,17 @@ export interface TimedToken {
   end_s : number
 }
 
+export interface Span {
+  text : string
+  size : number
+  x : number
+  y : number
+}
+
+export function page_paragraphs(spans : Span[], body_min_size : number) : string[]
+
+export function detect_body_size(spans : Span[]) : number
+
 export function pack(paras : string[], max_chars : number) : string[]
 
 export function join_timestamps(

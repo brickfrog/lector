@@ -4,6 +4,7 @@ import {
   "brickfrog/lector/timing",
   "brickfrog/lector/ass",
   "brickfrog/lector/assemble",
+  "brickfrog/lector/clean",
 }
 
 options(
@@ -11,8 +12,16 @@ options(
     "js": {
       "format": "esm",
       "exports": [
-        "pack", "join_timestamps", "fmt_time", "split_lines",
-        "to_ass", "cumulative_offsets", "shift", "merge_timed",
+        "pack",
+        "page_paragraphs",
+        "detect_body_size",
+        "join_timestamps",
+        "fmt_time",
+        "split_lines",
+        "to_ass",
+        "cumulative_offsets",
+        "shift",
+        "merge_timed",
       ],
     },
   },
