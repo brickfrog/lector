@@ -5,22 +5,35 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>lector</title>
     <style>
-      body { font: 18px/1.7 Georgia, serif; max-width: 60ch; margin: 2.5rem auto; padding: 0 1rem; color: #222; }
+      body { font: 16px/1.6 Georgia, serif; max-width: 64ch; margin: 2rem auto; padding: 0 1rem; color: #222; }
       h1 { font-size: 1.1rem; color: #666; font-weight: normal; }
-      #status { color: #888; font-size: 0.85rem; margin: 0.5rem 0; }
-      audio { width: 100%; margin: 1rem 0; }
-      #reader { font-size: 1.4rem; line-height: 2.2; }
-      #reader .w { transition: background 80ms, color 80ms; padding: 0 1px; border-radius: 3px; color: #999; }
-      #reader .w.spoken { color: #111; }
+      #status { color: #888; font-size: 0.85rem; margin: 0.4rem 0; }
+      .row { display: flex; gap: 0.75rem; align-items: center; margin: 0.75rem 0; flex-wrap: wrap; }
+      button { font: inherit; padding: 0.3rem 0.8rem; cursor: pointer; }
+      #info { font-size: 0.85rem; color: #555; }
+      #paras p { color: #444; }
+      audio { width: 100%; margin: 0.75rem 0; }
+      #reader { font-size: 1.3rem; line-height: 2.1; margin-top: 0.5rem; }
+      #reader .w { color: #aaa; padding: 0 1px; border-radius: 3px; transition: background 80ms, color 80ms; }
+      #reader .w.spoken { color: #222; }
       #reader .w.active { background: #ffe14d; color: #000; }
       .ok { color: #2a7; } .bad { color: #c33; }
     </style>
   </head>
   <body>
-    <h1>lector — read-along (local Kokoro + MoonBit core)</h1>
+    <h1>lector — PDF → read-along (local Kokoro + MoonBit core)</h1>
     <div id="status">loading…</div>
+    <div class="row">
+      <button id="sample">Load sample.pdf</button>
+      <label>or <input id="file" type="file" accept="application/pdf" /></label>
+    </div>
+    <div id="info"></div>
+    <div class="row">
+      <button id="read" disabled>▶ Read first chunk (synthesize)</button>
+    </div>
     <audio id="audio" controls></audio>
     <div id="reader"></div>
+    <details><summary style="cursor:pointer;font-size:.85rem;color:#888">extracted paragraphs</summary><div id="paras"></div></details>
     <script type="module" src="/src/main.ts"></script>
   </body>
 </html>

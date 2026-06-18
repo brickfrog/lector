@@ -1,34 +1,52 @@
-// Full read-along slice: text -> Kokoro (browser) -> core timings -> audio +
-// word-synced DOM highlighting. All client-side, no Python.
+// PDF -> cleaned paragraphs (pdf.js + core, all local) -> optional read-along
+// of the first chunk (Kokoro synth in the worker + word-synced highlight).
 import * as lector from "./core/lector.js"
-import { init, synth, gpuAvailable } from "./bridge.js"
+import { init, synth } from "./bridge.js"
 import { buildTokens } from "./align.js"
 import { encodeWav } from "./wav.js"
+import { ingestPdf, type Ingested } from "./ingest.js"
 
-const status = document.getElementById("status")!
-const audio = document.getElementById("audio") as HTMLAudioElement
-const reader = document.getElementById("reader")!
+const $ = (id: string) => document.getElementById(id)!
+const status = $("status")
+const info = $("info")
+const paras = $("paras")
+const reader = $("reader")
+const audio = $("audio") as HTMLAudioElement
+const readBtn = $("read") as HTMLButtonElement
 
-const TEXT =
-  "The basic concept of exit, voice, and loyalty was developed by Professor Hirschman in 1970."
+let current: Ingested | null = null
 
-async function run() {
+async function loadPdf(src: string | ArrayBuffer) {
+  status.textContent = "extracting…"
+  reader.replaceChildren()
   try {
-    const t0 = performance.now()
-    status.textContent = "loading model (off-thread)…"
-    await init()
-    const tLoad = performance.now()
-    status.textContent = "synthesizing (UI stays responsive)…"
-    const r = await synth(TEXT, "bm_george", "b")
-    const tSynth = performance.now()
-    const perf =
-      ` [gpu:${gpuAvailable() ? "yes" : "no"} | load ${((tLoad - t0) / 1000).toFixed(1)}s` +
-      ` | synth ${((tSynth - tLoad) / 1000).toFixed(1)}s]`
+    current = await ingestPdf(src)
+    info.innerHTML =
+      `<b>${current.numPages}</b> pages · <b>${current.paragraphs.length}</b> paragraphs · ` +
+      `<b>${current.chunks.length}</b> chunk(s)`
+    paras.replaceChildren(
+      ...current.paragraphs.map((p) => {
+        const el = document.createElement("p")
+        el.textContent = p
+        return el
+      }),
+    )
+    readBtn.disabled = current.chunks.length === 0
+    status.innerHTML = '<span class="ok">extracted ✓</span> — press Read for a read-along'
+  } catch (e) {
+    status.innerHTML = '<span class="bad">extract failed: ' + (e as Error).message + "</span>"
+  }
+}
 
-    const tokens = buildTokens(TEXT, r.phonemes)
+async function readAlong(text: string) {
+  status.textContent = "loading model + synthesizing (UI stays responsive)…"
+  readBtn.disabled = true
+  try {
+    await init()
+    const r = await synth(text, "bm_george", "b")
+    const tokens = buildTokens(text, r.phonemes)
     const timed = lector.join_timestamps(tokens, r.duration)
 
-    // lay out words as spans
     reader.replaceChildren()
     const spans: HTMLSpanElement[] = timed.map((t: any) => {
       const s = document.createElement("span")
@@ -37,57 +55,32 @@ async function run() {
       reader.append(s, document.createTextNode(" "))
       return s
     })
-
-    // --- diagnostics: is the in-browser waveform actually audio? ---
-    let maxAmp = 0
-    for (let i = 0; i < r.waveform.length; i++) {
-      const a = Math.abs(r.waveform[i])
-      if (a > maxAmp) maxAmp = a
-    }
-    const diag = document.createElement("div")
-    diag.style.cssText = "font-size:.8rem;color:#888;margin:.5rem 0"
-    diag.textContent =
-      `waveform: ${r.waveform.length} samples, max|amp|=${maxAmp.toFixed(3)} ` +
-      `(ctor=${(r.waveform as any).constructor?.name})`
-    reader.before(diag)
-
-    // audio + a direct download to bypass the <audio> element entirely
-    const wavBlob = encodeWav(r.waveform, r.sampleRate)
-    const url = URL.createObjectURL(wavBlob)
-    audio.src = url
-    audio.addEventListener("error", () =>
-      (diag.textContent += `  | audio error: ${audio.error?.code}`))
-    audio.addEventListener("loadedmetadata", () =>
-      (diag.textContent += `  | audio.duration=${audio.duration.toFixed(2)}`))
-    const dl = document.createElement("a")
-    dl.href = url
-    dl.download = "lector_sample.wav"
-    dl.textContent = "⬇ download the WAV (play it directly)"
-    dl.style.cssText = "display:block;font-size:.85rem;margin:.5rem 0"
-    diag.after(dl)
-
-    // word-synced highlight, driven by audio.currentTime
+    audio.src = URL.createObjectURL(encodeWav(r.waveform, r.sampleRate))
     let raf = 0
     const tick = () => {
       const t = audio.currentTime
       for (let i = 0; i < timed.length; i++) {
         const active = t >= timed[i].start_s && t < timed[i].end_s
-        const spoken = t >= timed[i].end_s
         spans[i].classList.toggle("active", active)
-        spans[i].classList.toggle("spoken", spoken && !active)
+        spans[i].classList.toggle("spoken", t >= timed[i].end_s && !active)
       }
       raf = requestAnimationFrame(tick)
     }
     audio.onplay = () => (raf = requestAnimationFrame(tick))
     audio.onpause = () => cancelAnimationFrame(raf)
-
-    status.innerHTML =
-      '<span class="ok">ready — press play to read along ✓</span> (' +
-      timed.length + " words, " + (r.waveform.length / r.sampleRate).toFixed(1) + "s)" + perf
+    status.innerHTML = '<span class="ok">ready — press play ✓</span>'
   } catch (e) {
-    status.innerHTML = '<span class="bad">failed: ' + (e as Error).message + "</span>"
-    console.error(e)
+    status.innerHTML = '<span class="bad">synth failed: ' + (e as Error).message + "</span>"
+  } finally {
+    readBtn.disabled = false
   }
 }
 
-run()
+;($("sample") as HTMLButtonElement).onclick = () => loadPdf("/sample.pdf")
+;($("file") as HTMLInputElement).onchange = async (e) => {
+  const f = (e.target as HTMLInputElement).files?.[0]
+  if (f) loadPdf(await f.arrayBuffer())
+}
+readBtn.onclick = () => current && readAlong(current.chunks[0])
+
+loadPdf("/sample.pdf") // auto-load on start

@@ -15,6 +15,7 @@
   },
   "dependencies": {
     "kokoro-js": "^1.2.1",
-    "onnxruntime-web": "^1.26.0"
+    "onnxruntime-web": "^1.26.0",
+    "pdfjs-dist": "^6.0.227"
   }
 }
