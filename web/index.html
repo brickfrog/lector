@@ -3,18 +3,24 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>lector — core in browser</title>
+    <title>lector</title>
     <style>
-      body { font: 16px/1.5 Georgia, serif; max-width: 60ch; margin: 3rem auto; padding: 0 1rem; }
-      h1 { font-size: 1.2rem; }
-      pre { background: #111; color: #ddd; padding: 1rem; overflow-x: auto; border-radius: 6px; }
+      body { font: 18px/1.7 Georgia, serif; max-width: 60ch; margin: 2.5rem auto; padding: 0 1rem; color: #222; }
+      h1 { font-size: 1.1rem; color: #666; font-weight: normal; }
+      #status { color: #888; font-size: 0.85rem; margin: 0.5rem 0; }
+      audio { width: 100%; margin: 1rem 0; }
+      #reader { font-size: 1.4rem; line-height: 2.2; }
+      #reader .w { transition: background 80ms, color 80ms; padding: 0 1px; border-radius: 3px; color: #999; }
+      #reader .w.spoken { color: #111; }
+      #reader .w.active { background: #ffe14d; color: #000; }
       .ok { color: #2a7; } .bad { color: #c33; }
     </style>
   </head>
   <body>
-    <h1>lector core — running in the browser</h1>
+    <h1>lector — read-along (local Kokoro + MoonBit core)</h1>
     <div id="status">loading…</div>
-    <pre id="out"></pre>
+    <audio id="audio" controls></audio>
+    <div id="reader"></div>
     <script type="module" src="/src/main.ts"></script>
   </body>
 </html>

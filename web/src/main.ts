@@ -1,35 +1,60 @@
-// Step A: prove our duration-exposing Kokoro model runs in onnxruntime-web,
-// in the browser, and yields per-token durations alongside the waveform.
+// Full read-along slice: text -> Kokoro (browser) -> core timings -> audio +
+// word-synced DOM highlighting. All client-side, no Python.
 import * as lector from "./core/lector.js"
 import { init, synth } from "./bridge.js"
+import { buildTokens } from "./align.js"
+import { encodeWav } from "./wav.js"
 
-const out = document.getElementById("out")!
 const status = document.getElementById("status")!
-const log = (s: string) => (out.textContent += s + "\n")
+const audio = document.getElementById("audio") as HTMLAudioElement
+const reader = document.getElementById("reader")!
 
-const TEXT = "The basic concept of exit, voice, and loyalty was developed by Professor Hirschman in 1970."
+const TEXT =
+  "The basic concept of exit, voice, and loyalty was developed by Professor Hirschman in 1970."
 
 async function run() {
   try {
-    // core sanity (unchanged from slice 1)
-    log("core.fmt_time(3661.5) = " + lector.fmt_time(3661.5))
-
     await init((s) => (status.textContent = s))
     status.textContent = "synthesizing…"
     const r = await synth(TEXT, "bm_george", "b")
 
-    log("")
-    log("phonemes: " + r.phonemes)
-    log("input_ids: " + r.inputIds.length + " tokens")
-    log("duration: " + JSON.stringify(r.duration))
-    log("sum(duration) = " + r.duration.reduce((a, b) => a + b, 0) + " frames")
-    log("waveform: " + r.waveform.length + " samples (" + (r.waveform.length / r.sampleRate).toFixed(2) + "s)")
-    log("samples/frame = " + (r.waveform.length / r.duration.reduce((a, b) => a + b, 0)).toFixed(1))
+    const tokens = buildTokens(TEXT, r.phonemes)
+    const timed = lector.join_timestamps(tokens, r.duration)
 
-    status.innerHTML = '<span class="ok">our model ran in onnxruntime-web, duration exposed ✓</span>'
+    // lay out words as spans
+    reader.replaceChildren()
+    const spans: HTMLSpanElement[] = timed.map((t: any) => {
+      const s = document.createElement("span")
+      s.className = "w"
+      s.textContent = t.text
+      reader.append(s, document.createTextNode(" "))
+      return s
+    })
+
+    // audio
+    audio.src = URL.createObjectURL(encodeWav(r.waveform, r.sampleRate))
+
+    // word-synced highlight, driven by audio.currentTime
+    let raf = 0
+    const tick = () => {
+      const t = audio.currentTime
+      for (let i = 0; i < timed.length; i++) {
+        const active = t >= timed[i].start_s && t < timed[i].end_s
+        const spoken = t >= timed[i].end_s
+        spans[i].classList.toggle("active", active)
+        spans[i].classList.toggle("spoken", spoken && !active)
+      }
+      raf = requestAnimationFrame(tick)
+    }
+    audio.onplay = () => (raf = requestAnimationFrame(tick))
+    audio.onpause = () => cancelAnimationFrame(raf)
+
+    status.innerHTML =
+      '<span class="ok">ready — press play to read along ✓</span> (' +
+      timed.length + " words, " + (r.waveform.length / r.sampleRate).toFixed(1) + "s)"
   } catch (e) {
-    status.innerHTML = '<span class="bad">bridge failed: ' + (e as Error).message + "</span>"
-    log("ERROR: " + (e as Error).stack)
+    status.innerHTML = '<span class="bad">failed: ' + (e as Error).message + "</span>"
+    console.error(e)
   }
 }
 
