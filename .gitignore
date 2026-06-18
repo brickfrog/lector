@@ -1,0 +1,40 @@
+# --- build / deps ---
+_build/
+target/
+.mooncakes/
+.moonagent/
+node_modules/
+__pycache__/
+.venv/
+*.pyc
+
+# --- caches & sandbox scratch ---
+.tts_cache/
+.repair_cache/
+.torch/
+.xdgcache/
+
+# --- large / derived / COPYRIGHTED media: never commit ---
+# (source books and generated audiobooks are not ours to redistribute)
+*.pdf
+*.epub
+*.mp3
+*.mp4
+*.wav
+*.m4b
+*.ass
+audio/
+
+# --- pipeline scratch ---
+chapters.txt
+concat.txt
+pages.json
+
+# --- OS ---
+.DS_Store
+
+# NOTE: core/testdata/*.json is intentionally tracked (tiny, our own golden fixture).
+!core/testdata/*.json
+
+# extracted/repaired book prose — copyrighted intermediate artifacts
+text/
