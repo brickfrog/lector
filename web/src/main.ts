@@ -1,27 +1,36 @@
-// Slice 1: prove the MoonBit core runs in the browser, plain-data in and out.
+// Step A: prove our duration-exposing Kokoro model runs in onnxruntime-web,
+// in the browser, and yields per-token durations alongside the waveform.
 import * as lector from "./core/lector.js"
-import type { Token } from "./core/lector.js"
+import { init, synth } from "./bridge.js"
 
 const out = document.getElementById("out")!
 const status = document.getElementById("status")!
 const log = (s: string) => (out.textContent += s + "\n")
 
-try {
-  log("fmt_time(3661.5)         = " + lector.fmt_time(3661.5))
-  log('pack(["a","b"], 100)     = ' + JSON.stringify(lector.pack(["a", "b"], 100)))
+const TEXT = "The basic concept of exit, voice, and loyalty was developed by Professor Hirschman in 1970."
 
-  // a tiny join_timestamps + to_ass round-trip
-  const tokens: Token[] = [
-    { text: "The", phonemes: "ðə", whitespace: true },
-    { text: "cat", phonemes: "kat", whitespace: false },
-  ]
-  const timed = lector.join_timestamps(tokens, [12, 1, 2, 2, 2, 3, 3, 1])
-  log("join_timestamps          = " + JSON.stringify(timed))
-  log("")
-  log("to_ass (first lines):")
-  log(lector.to_ass(timed, 12).split("\n").filter((l) => l.startsWith("Dialogue")).join("\n"))
+async function run() {
+  try {
+    // core sanity (unchanged from slice 1)
+    log("core.fmt_time(3661.5) = " + lector.fmt_time(3661.5))
 
-  status.innerHTML = '<span class="ok">core loaded and ran in the browser ✓</span>'
-} catch (e) {
-  status.innerHTML = '<span class="bad">core failed: ' + (e as Error).message + "</span>"
+    await init((s) => (status.textContent = s))
+    status.textContent = "synthesizing…"
+    const r = await synth(TEXT, "bm_george", "b")
+
+    log("")
+    log("phonemes: " + r.phonemes)
+    log("input_ids: " + r.inputIds.length + " tokens")
+    log("duration: " + JSON.stringify(r.duration))
+    log("sum(duration) = " + r.duration.reduce((a, b) => a + b, 0) + " frames")
+    log("waveform: " + r.waveform.length + " samples (" + (r.waveform.length / r.sampleRate).toFixed(2) + "s)")
+    log("samples/frame = " + (r.waveform.length / r.duration.reduce((a, b) => a + b, 0)).toFixed(1))
+
+    status.innerHTML = '<span class="ok">our model ran in onnxruntime-web, duration exposed ✓</span>'
+  } catch (e) {
+    status.innerHTML = '<span class="bad">bridge failed: ' + (e as Error).message + "</span>"
+    log("ERROR: " + (e as Error).stack)
+  }
 }
+
+run()
