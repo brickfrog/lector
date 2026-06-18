@@ -1,0 +1,20 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>lector — core in browser</title>
+    <style>
+      body { font: 16px/1.5 Georgia, serif; max-width: 60ch; margin: 3rem auto; padding: 0 1rem; }
+      h1 { font-size: 1.2rem; }
+      pre { background: #111; color: #ddd; padding: 1rem; overflow-x: auto; border-radius: 6px; }
+      .ok { color: #2a7; } .bad { color: #c33; }
+    </style>
+  </head>
+  <body>
+    <h1>lector core — running in the browser</h1>
+    <div id="status">loading…</div>
+    <pre id="out"></pre>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>

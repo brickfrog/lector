@@ -38,3 +38,8 @@ pages.json
 
 # extracted/repaired book prose — copyrighted intermediate artifacts
 text/
+
+# web
+web/node_modules/
+web/dist/
+web/src/core/lector.js
