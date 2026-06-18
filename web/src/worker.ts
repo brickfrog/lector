@@ -7,11 +7,12 @@ import { phonemize } from "phonemizer"
 
 ort.env.wasm.wasmPaths = `https://cdn.jsdelivr.net/npm/onnxruntime-web@${ort.env.versions.web}/dist/`
 
-// Single fp32 model (our duration-exposing export): gives both waveform and
-// duration, and is the only format that actually produces audio under ort-web
-// (q8 and fp16 both come back silent in the wasm/webgpu backends). Slow (~16s)
-// because the disable_complex iSTFT falls back to CPU on webgpu. The faster path
-// (stock fp32 audio via kokoro-js + our duronly for timing) is a next step.
+// Single fp32 on WASM. The full matrix we actually measured on this hardware:
+//   q8 / fp16            -> silent (ort-web can't run quantized/half Kokoro)
+//   fp32 on webgpu       -> garbage audio (ort-web webgpu numerics, AMD/Linux/Vulkan)
+//   our fp32 on wasm     -> correct, ~16s  <-- the only good config
+// So: pin wasm. Speed is wasm-bound; the real fix is render-ahead caching (synth
+// chunks in the worker, play cached) which lands with ingest.
 const MODEL_URL = "/models/kokoro_dur.onnx"
 const VOCAB_URL = "/tokenizer/tokenizer.json"
 const voiceUrl = (v: string) => `/voices/${v}.bin`
@@ -21,9 +22,7 @@ let vocab: Record<string, number> | null = null
 
 async function init() {
   vocab = (await (await fetch(VOCAB_URL)).json()).model.vocab
-  session = await ort.InferenceSession.create(MODEL_URL, {
-    executionProviders: ["webgpu", "wasm"],
-  })
+  session = await ort.InferenceSession.create(MODEL_URL, { executionProviders: ["wasm"] })
 }
 
 function tokenize(phonemes: string): number[] {
