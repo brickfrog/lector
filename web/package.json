@@ -7,7 +7,7 @@
     "dev": "vite",
     "build": "vite build",
     "preview": "vite preview",
-    "vendor": "mkdir -p public/voices public/tokenizer public/models && cp ../reference/models/kokoro_dur_q8.onnx public/models/ && curl -sL https://huggingface.co/onnx-community/Kokoro-82M-v1.0-ONNX/resolve/main/voices/bm_george.bin -o public/voices/bm_george.bin && curl -sL https://huggingface.co/onnx-community/Kokoro-82M-v1.0-ONNX/resolve/main/tokenizer.json -o public/tokenizer/tokenizer.json"
+    "vendor": "mkdir -p public/voices public/tokenizer public/models && cp ../reference/models/kokoro_dur.onnx public/models/ && curl -sL https://huggingface.co/onnx-community/Kokoro-82M-v1.0-ONNX/resolve/main/voices/bm_george.bin -o public/voices/bm_george.bin && curl -sL https://huggingface.co/onnx-community/Kokoro-82M-v1.0-ONNX/resolve/main/tokenizer.json -o public/tokenizer/tokenizer.json"
   },
   "devDependencies": {
     "typescript": "^5.6.0",

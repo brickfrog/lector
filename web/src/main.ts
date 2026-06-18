@@ -31,8 +31,33 @@ async function run() {
       return s
     })
 
-    // audio
-    audio.src = URL.createObjectURL(encodeWav(r.waveform, r.sampleRate))
+    // --- diagnostics: is the in-browser waveform actually audio? ---
+    let maxAmp = 0
+    for (let i = 0; i < r.waveform.length; i++) {
+      const a = Math.abs(r.waveform[i])
+      if (a > maxAmp) maxAmp = a
+    }
+    const diag = document.createElement("div")
+    diag.style.cssText = "font-size:.8rem;color:#888;margin:.5rem 0"
+    diag.textContent =
+      `waveform: ${r.waveform.length} samples, max|amp|=${maxAmp.toFixed(3)} ` +
+      `(ctor=${(r.waveform as any).constructor?.name})`
+    reader.before(diag)
+
+    // audio + a direct download to bypass the <audio> element entirely
+    const wavBlob = encodeWav(r.waveform, r.sampleRate)
+    const url = URL.createObjectURL(wavBlob)
+    audio.src = url
+    audio.addEventListener("error", () =>
+      (diag.textContent += `  | audio error: ${audio.error?.code}`))
+    audio.addEventListener("loadedmetadata", () =>
+      (diag.textContent += `  | audio.duration=${audio.duration.toFixed(2)}`))
+    const dl = document.createElement("a")
+    dl.href = url
+    dl.download = "lector_sample.wav"
+    dl.textContent = "⬇ download the WAV (play it directly)"
+    dl.style.cssText = "display:block;font-size:.85rem;margin:.5rem 0"
+    diag.after(dl)
 
     // word-synced highlight, driven by audio.currentTime
     let raf = 0

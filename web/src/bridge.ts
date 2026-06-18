@@ -13,7 +13,10 @@ import { phonemize } from "phonemizer"
 // plugin or a prod build step.
 ort.env.wasm.wasmPaths = `https://cdn.jsdelivr.net/npm/onnxruntime-web@${ort.env.versions.web}/dist/`
 
-const MODEL_URL = "/models/kokoro_dur_q8.onnx"
+// fp32: q8's int8 vocoder ops compute as silence under ort-web's wasm backend
+// (the duration head survives, the waveform doesn't). fp32 is the format kokoro-js
+// uses in-browser, so it's ort-web-safe. TODO: a correct fp16 to halve the size.
+const MODEL_URL = "/models/kokoro_dur.onnx"
 const VOCAB_URL = "/tokenizer/tokenizer.json"
 const voiceUrl = (v: string) => `/voices/${v}.bin`
 
