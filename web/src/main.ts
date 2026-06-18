@@ -1,7 +1,7 @@
 // Full read-along slice: text -> Kokoro (browser) -> core timings -> audio +
 // word-synced DOM highlighting. All client-side, no Python.
 import * as lector from "./core/lector.js"
-import { init, synth } from "./bridge.js"
+import { init, synth, gpuAvailable } from "./bridge.js"
 import { buildTokens } from "./align.js"
 import { encodeWav } from "./wav.js"
 
@@ -14,9 +14,16 @@ const TEXT =
 
 async function run() {
   try {
-    await init((s) => (status.textContent = s))
-    status.textContent = "synthesizing…"
+    const t0 = performance.now()
+    status.textContent = "loading model (off-thread)…"
+    await init()
+    const tLoad = performance.now()
+    status.textContent = "synthesizing (UI stays responsive)…"
     const r = await synth(TEXT, "bm_george", "b")
+    const tSynth = performance.now()
+    const perf =
+      ` [gpu:${gpuAvailable() ? "yes" : "no"} | load ${((tLoad - t0) / 1000).toFixed(1)}s` +
+      ` | synth ${((tSynth - tLoad) / 1000).toFixed(1)}s]`
 
     const tokens = buildTokens(TEXT, r.phonemes)
     const timed = lector.join_timestamps(tokens, r.duration)
@@ -76,7 +83,7 @@ async function run() {
 
     status.innerHTML =
       '<span class="ok">ready — press play to read along ✓</span> (' +
-      timed.length + " words, " + (r.waveform.length / r.sampleRate).toFixed(1) + "s)"
+      timed.length + " words, " + (r.waveform.length / r.sampleRate).toFixed(1) + "s)" + perf
   } catch (e) {
     status.innerHTML = '<span class="bad">failed: ' + (e as Error).message + "</span>"
     console.error(e)
