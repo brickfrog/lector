@@ -7,25 +7,23 @@ import { phonemize } from "phonemizer"
 
 ort.env.wasm.wasmPaths = `https://cdn.jsdelivr.net/npm/onnxruntime-web@${ort.env.versions.web}/dist/`
 
-// Dual model: onnx-community's stock fp16 for AUDIO (webgpu-fast, no iSTFT CPU
-// fallback), our tiny duration-only model for TIMING. Same weights -> the
-// waveform length and our durations agree to the frame.
-const AUDIO_URL = "/models/kokoro_stock_fp16.onnx"
-const DUR_URL = "/models/kokoro_duronly.onnx"
+// Single fp32 model (our duration-exposing export): gives both waveform and
+// duration, and is the only format that actually produces audio under ort-web
+// (q8 and fp16 both come back silent in the wasm/webgpu backends). Slow (~16s)
+// because the disable_complex iSTFT falls back to CPU on webgpu. The faster path
+// (stock fp32 audio via kokoro-js + our duronly for timing) is a next step.
+const MODEL_URL = "/models/kokoro_dur.onnx"
 const VOCAB_URL = "/tokenizer/tokenizer.json"
 const voiceUrl = (v: string) => `/voices/${v}.bin`
 
-let audioSession: ort.InferenceSession | null = null
-let durSession: ort.InferenceSession | null = null
+let session: ort.InferenceSession | null = null
 let vocab: Record<string, number> | null = null
 
 async function init() {
   vocab = (await (await fetch(VOCAB_URL)).json()).model.vocab
-  const opts = { executionProviders: ["webgpu", "wasm"] }
-  ;[audioSession, durSession] = await Promise.all([
-    ort.InferenceSession.create(AUDIO_URL, opts),
-    ort.InferenceSession.create(DUR_URL, opts),
-  ])
+  session = await ort.InferenceSession.create(MODEL_URL, {
+    executionProviders: ["webgpu", "wasm"],
+  })
 }
 
 function tokenize(phonemes: string): number[] {
@@ -39,7 +37,7 @@ function tokenize(phonemes: string): number[] {
 }
 
 async function synth(text: string, voice: string, lang: "a" | "b") {
-  if (!audioSession || !durSession || !vocab) throw new Error("not initialized")
+  if (!session || !vocab) throw new Error("not initialized")
   const phonemes = (await phonemize(text, lang === "b" ? "en-gb" : "en-us")).join(" ")
   const inputIds = tokenize(phonemes)
   const len = inputIds.length
@@ -47,17 +45,14 @@ async function synth(text: string, voice: string, lang: "a" | "b") {
   const packed = new Float32Array(buf)
   const off = 256 * Math.min(Math.max(len - 2, 0), 509)
   const style = packed.slice(off, off + 256)
-
-  const ids = new ort.Tensor("int64", BigInt64Array.from(inputIds.map((n) => BigInt(n))), [1, len])
-  const styleT = new ort.Tensor("float32", style, [1, 256])
-
-  // audio (stock fp16, speed=float32) and duration (duronly, speed=int32)
-  const [aout, dout] = await Promise.all([
-    audioSession.run({ input_ids: ids, style: styleT, speed: new ort.Tensor("float32", Float32Array.from([1]), [1]) }),
-    durSession.run({ input_ids: ids, style: styleT, speed: new ort.Tensor("int32", Int32Array.from([1]), [1]) }),
-  ])
-  const waveform = Float32Array.from(aout.waveform.data as Float32Array)
-  const duration = Array.from(dout.duration.data as ArrayLike<bigint | number>).map(Number)
+  const feeds = {
+    input_ids: new ort.Tensor("int64", BigInt64Array.from(inputIds.map((n) => BigInt(n))), [1, len]),
+    style: new ort.Tensor("float32", style, [1, 256]),
+    speed: new ort.Tensor("int32", Int32Array.from([1]), [1]),
+  }
+  const out = await session.run(feeds)
+  const duration = Array.from(out.duration.data as ArrayLike<bigint | number>).map(Number)
+  const waveform = Float32Array.from(out.waveform.data as Float32Array)
   return { phonemes, inputIds, duration, waveform, sampleRate: 24000 }
 }
 

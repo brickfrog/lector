@@ -6,15 +6,12 @@ cd "$(dirname "$0")"
 mkdir -p public/models public/voices public/tokenizer
 base="https://huggingface.co/onnx-community/Kokoro-82M-v1.0-ONNX/resolve/main"
 
-echo "audio model (stock fp16, ~163MB)…"
-curl -sL --retry 5 --retry-all-errors -C - -o public/models/kokoro_stock_fp16.onnx \
-  "$base/onnx/model_fp16.onnx"
-
-echo "duration model (ours)…"
-if [ -f ../reference/models/kokoro_duronly.onnx ]; then
-  cp ../reference/models/kokoro_duronly.onnx public/models/
+# Our duration-exposing fp32 model (built by reference/export_dur.py). fp32 is
+# the only format that makes audio under ort-web; q8/fp16 come back silent.
+if [ -f ../reference/models/kokoro_dur.onnx ]; then
+  cp ../reference/models/kokoro_dur.onnx public/models/
 else
-  echo "  MISSING: build it first -> uv run ../reference/export_duronly.py"
+  echo "MISSING model: build it first -> uv run ../reference/export_dur.py"
   exit 1
 fi
 
