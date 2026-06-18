@@ -5,3 +5,15 @@ import {
   "brickfrog/lector/ass",
   "brickfrog/lector/assemble",
 }
+
+options(
+  link: {
+    "js": {
+      "format": "esm",
+      "exports": [
+        "pack", "join_timestamps", "fmt_time", "split_lines",
+        "to_ass", "cumulative_offsets", "shift", "merge_timed",
+      ],
+    },
+  },
+)
