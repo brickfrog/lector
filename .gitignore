@@ -43,3 +43,9 @@ text/
 web/node_modules/
 web/dist/
 web/src/core/lector.js
+
+# model artifacts
+*.onnx
+*.onnx_data
+web/public/models/
+web/public/
