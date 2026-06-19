@@ -1,5 +1,5 @@
-// PDF -> cleaned paragraphs (pdf.js + core, all local) -> continuous read-along
-// of the whole document (Kokoro synth in the worker, render-ahead, word highlight).
+// PDF -> cleaned paragraphs (pdf.js + core, all local) -> gapless continuous
+// read-along of the whole document (Web Audio, render-ahead, word highlight).
 import { ingestPdf, type Ingested } from "./ingest.js"
 import { Reader, type Rendered } from "./player.js"
 import type { Progress } from "./bridge.js"
@@ -9,7 +9,6 @@ const status = $("status")
 const info = $("info")
 const paras = $("paras")
 const readerEl = $("reader")
-const audio = $("audio") as HTMLAudioElement
 const bar = $("bar") as HTMLProgressElement
 const playBtn = $("play") as HTMLButtonElement
 const prevBtn = $("prev") as HTMLButtonElement
@@ -18,6 +17,8 @@ const pos = $("pos")
 
 let current: Ingested | null = null
 let player: Reader | null = null
+let playing = false
+let everStarted = false
 
 const mb = (n: number) => (n / 1e6).toFixed(0)
 const showBar = () => bar.setAttribute("data-on", "")
@@ -28,30 +29,33 @@ const determinate = (frac: number) => {
 }
 const indeterminate = () => bar.removeAttribute("value")
 
-// --- read-along highlight (single rAF loop over the current chunk) ---
-let hlTimed: Rendered["timed"] = []
+// --- read-along highlight (player drives the active word index) ---
 let hlSpans: HTMLSpanElement[] = []
-let raf = 0
-function tick() {
-  const t = audio.currentTime
-  for (let i = 0; i < hlTimed.length; i++) {
-    const active = t >= hlTimed[i].start_s && t < hlTimed[i].end_s
-    hlSpans[i].classList.toggle("active", active)
-    hlSpans[i].classList.toggle("spoken", t >= hlTimed[i].end_s && !active)
+function showChunk(idx: number, total: number, r: Rendered) {
+  stopTimer()
+  hideBar()
+  hlSpans = r.timed.map((t) => {
+    const s = document.createElement("span")
+    s.className = "w"
+    s.textContent = t.text
+    return s
+  })
+  readerEl.replaceChildren()
+  hlSpans.forEach((s) => readerEl.append(s, document.createTextNode(" ")))
+  pos.textContent = `chunk ${idx + 1} / ${total}`
+  prevBtn.disabled = idx === 0
+  nextBtn.disabled = idx >= total - 1
+}
+function highlightWord(active: number) {
+  for (let i = 0; i < hlSpans.length; i++) {
+    hlSpans[i].classList.toggle("active", i === active)
+    hlSpans[i].classList.toggle("spoken", i < active)
   }
-  raf = requestAnimationFrame(tick)
 }
-audio.onplay = () => {
-  cancelAnimationFrame(raf)
-  raf = requestAnimationFrame(tick)
-}
-audio.onpause = () => cancelAnimationFrame(raf)
-// single owner of auto-advance: always the current player (no stale listeners)
-audio.onended = () => player?.next()
 
-// --- progress / status timer for the chunk the user is waiting on ---
+// --- progress / elapsed timer for the chunk the user is waiting on ---
 let timer = 0
-const stopTimer = () => {
+function stopTimer() {
   if (timer) {
     clearInterval(timer)
     timer = 0
@@ -78,36 +82,25 @@ function onProgress(p: Progress) {
     const t0 = performance.now()
     stopTimer()
     timer = window.setInterval(() => {
-      status.textContent = `synthesizing… ${((performance.now() - t0) / 1000).toFixed(1)}s`
+      status.textContent = `synthesizing first chunk… ${((performance.now() - t0) / 1000).toFixed(1)}s`
     }, 100)
   }
 }
 
-function showChunk(idx: number, total: number, r: Rendered) {
-  stopTimer()
-  hideBar()
-  hlTimed = r.timed
-  hlSpans = r.timed.map((t) => {
-    const s = document.createElement("span")
-    s.className = "w"
-    s.textContent = t.text
-    return s
-  })
-  readerEl.replaceChildren()
-  hlSpans.forEach((s) => readerEl.append(s, document.createTextNode(" ")))
-  pos.textContent = `chunk ${idx + 1} / ${total}`
-  prevBtn.disabled = idx === 0
-  nextBtn.disabled = idx >= total - 1
-  status.innerHTML = '<span class="ok">▶ reading…</span>'
+function setPlaying(on: boolean) {
+  playing = on
+  playBtn.textContent = on ? "⏸ Pause" : "▶ Play"
 }
 
 async function loadPdf(src: string | ArrayBuffer) {
   status.textContent = "extracting…"
   readerEl.replaceChildren()
   pos.textContent = ""
-  audio.removeAttribute("src")
-  playBtn.disabled = prevBtn.disabled = nextBtn.disabled = true
+  player?.dispose()
   player = null
+  setPlaying(false)
+  everStarted = false
+  playBtn.disabled = prevBtn.disabled = nextBtn.disabled = true
   try {
     current = await ingestPdf(src)
     info.innerHTML =
@@ -124,16 +117,20 @@ async function loadPdf(src: string | ArrayBuffer) {
       status.innerHTML = '<span class="bad">no readable text found</span>'
       return
     }
-    player = new Reader(current.chunks, audio, "bm_george", "b", {
+    player = new Reader(current.chunks, "bm_george", "b", {
       onChunk: showChunk,
+      onWord: highlightWord,
       onProgress,
+      onState: setPlaying,
       onStatus: (m) => (status.textContent = m),
       onError: (e) => {
         stopTimer()
         hideBar()
+        setPlaying(false)
         status.innerHTML = '<span class="bad">synth failed: ' + e.message + "</span>"
       },
       onEnd: () => {
+        everStarted = false
         status.innerHTML = '<span class="ok">✓ finished</span>'
       },
     })
@@ -152,11 +149,21 @@ const startIdx = () => {
 
 playBtn.onclick = () => {
   if (!player) return
-  if (audio.getAttribute("src")) player.resume()
-  else player.playFrom(startIdx())
+  if (playing) player.pause()
+  else if (everStarted) player.resume()
+  else {
+    everStarted = true
+    player.playFrom(startIdx())
+  }
 }
-prevBtn.onclick = () => player?.prev()
-nextBtn.onclick = () => player?.next()
+prevBtn.onclick = () => {
+  everStarted = true
+  player?.prev()
+}
+nextBtn.onclick = () => {
+  everStarted = true
+  player?.next()
+}
 ;($("sample") as HTMLButtonElement).onclick = () => loadPdf("/sample.pdf")
 ;($("file") as HTMLInputElement).onchange = async (e) => {
   const f = (e.target as HTMLInputElement).files?.[0]
