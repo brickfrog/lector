@@ -7,7 +7,9 @@
     <style>
       body { font: 16px/1.6 Georgia, serif; max-width: 64ch; margin: 2rem auto; padding: 0 1rem; color: #222; }
       h1 { font-size: 1.1rem; color: #666; font-weight: normal; }
-      #status { color: #888; font-size: 0.85rem; margin: 0.4rem 0; }
+      h2 { font-size: 1rem; color: #666; font-weight: normal; margin-top: 0; }
+      .card { border: 1px solid #e3e3e3; border-radius: 8px; padding: 1rem 1.25rem; margin: 1rem 0; }
+      #status, #ab-status { color: #888; font-size: 0.85rem; margin: 0.4rem 0; }
       #bar { width: 100%; height: 6px; margin: 0.3rem 0; display: none; }
       #bar[data-on] { display: block; }
       .row { display: flex; gap: 0.75rem; align-items: center; margin: 0.75rem 0; flex-wrap: wrap; }
@@ -19,26 +21,53 @@
       #reader .w { color: #aaa; padding: 0 1px; border-radius: 3px; transition: background 80ms, color 80ms; }
       #reader .w.spoken { color: #222; }
       #reader .w.active { background: #ffe14d; color: #000; }
+      /* audiobook player */
+      #ab-reader { margin-top: 0.5rem; min-height: 50vh; }
+      #ab-reader .ab-line { color: #bbb; font-size: 1.05rem; margin: 0.35rem 0; }
+      #ab-reader .ab-cur { color: #444; font-size: 1.35rem; line-height: 1.9; }
+      #ab-reader .ab-cur .w { color: #888; padding: 0 1px; border-radius: 3px; transition: background 80ms, color 80ms; }
+      #ab-reader .ab-cur .w.spoken { color: #222; }
+      #ab-reader .ab-cur .w.active { background: #ffe14d; color: #000; }
       .ok { color: #2a7; } .bad { color: #c33; }
+      .hint { font-size: 0.8rem; color: #999; }
     </style>
   </head>
   <body>
-    <h1>lector — PDF → read-along (local Kokoro + MoonBit core)</h1>
-    <div id="status">loading…</div>
-    <progress id="bar"></progress>
-    <div class="row">
-      <button id="sample">Load sample.pdf</button>
-      <label>or <input id="file" type="file" accept="application/pdf" /></label>
+    <h1>lector — karaoke audiobook reader</h1>
+
+    <div class="card">
+      <h2>▶ Play a pre-rendered audiobook</h2>
+      <p class="hint">Load an audio file and its <code>.ass</code> (from the native render pipeline). Full seek, no stalls.</p>
+      <div class="row">
+        <label>audio <input id="ab-audio-file" type="file" accept="audio/*,.m4b,.m4a,.mp3,.wav" /></label>
+        <label>.ass <input id="ab-ass-file" type="file" accept=".ass,text/plain" /></label>
+      </div>
+      <div id="ab-status">load an audio file and a .ass file</div>
+      <audio id="ab-audio" controls></audio>
+      <div id="ab-reader"></div>
     </div>
-    <div id="info"></div>
-    <div class="row">
-      <button id="play" disabled>▶ Play (read aloud)</button>
-      <button id="prev" disabled>◀ prev</button>
-      <button id="next" disabled>next ▶</button>
-      <span id="pos"></span>
-    </div>
-    <div id="reader"></div>
-    <details><summary style="cursor:pointer;font-size:.85rem;color:#888">extracted paragraphs</summary><div id="paras"></div></details>
+
+    <details class="card">
+      <summary style="cursor:pointer"><b>Live synth (experimental, slow on this machine)</b></summary>
+      <p class="hint">In-browser Kokoro. Fine for a paragraph; too slow for whole books (use the native render above).</p>
+      <div id="status">loading…</div>
+      <progress id="bar"></progress>
+      <div class="row">
+        <button id="sample">Load sample.pdf</button>
+        <label>or <input id="file" type="file" accept="application/pdf" /></label>
+      </div>
+      <div id="info"></div>
+      <div class="row">
+        <button id="play" disabled>▶ Play (read aloud)</button>
+        <button id="prev" disabled>◀ prev</button>
+        <button id="next" disabled>next ▶</button>
+        <span id="pos"></span>
+      </div>
+      <div id="reader"></div>
+      <details><summary style="cursor:pointer;font-size:.85rem;color:#888">extracted paragraphs</summary><div id="paras"></div></details>
+    </details>
+
+    <script type="module" src="/src/audiobook.ts"></script>
     <script type="module" src="/src/main.ts"></script>
   </body>
 </html>
