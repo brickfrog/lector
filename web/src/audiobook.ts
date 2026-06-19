@@ -8,11 +8,56 @@ const $ = (id: string) => document.getElementById(id)!
 const audio = $("ab-audio") as HTMLAudioElement
 const reader = $("ab-reader")
 const status = $("ab-status")
+const list = $("ab-books")
 const audioInput = $("ab-audio-file") as HTMLInputElement
 const assInput = $("ab-ass-file") as HTMLInputElement
 
 let lines: PlayLine[] = []
 let haveAudio = false
+
+interface Book {
+  slug: string
+  title: string
+  audio: string
+  seconds: number
+  words: number
+}
+
+// list books rendered into public/books/ (by render.mjs) so you just click one
+async function loadLibrary() {
+  let books: Book[] = []
+  try {
+    books = await (await fetch("/books/index.json")).json()
+  } catch {
+    /* no library yet */
+  }
+  list.replaceChildren()
+  if (!books.length) {
+    list.innerHTML = '<span class="hint">no rendered books yet — run <code>bun render.mjs your.pdf</code></span>'
+    return
+  }
+  for (const b of books) {
+    const btn = document.createElement("button")
+    const mins = Math.round(b.seconds / 60)
+    btn.textContent = `▶ ${b.title} (${mins} min)`
+    btn.onclick = () => openBook(b)
+    list.append(btn, document.createTextNode(" "))
+  }
+}
+
+async function openBook(b: Book) {
+  status.textContent = `loading ${b.title}…`
+  try {
+    const [assText] = await Promise.all([fetch(`/books/${b.slug}/book.ass`).then((r) => r.text())])
+    lines = parseAss(assText)
+    audio.src = `/books/${b.slug}/${b.audio}`
+    haveAudio = true
+    curLine = -1
+    status.innerHTML = `<span class="ok">${b.title}</span> — ${lines.length} lines, press play`
+  } catch (e) {
+    status.innerHTML = '<span class="bad">load failed: ' + (e as Error).message + "</span>"
+  }
+}
 
 // rendered window state
 let curLine = -1
@@ -114,3 +159,5 @@ assInput.onchange = async () => {
     status.innerHTML = '<span class="bad">.ass parse failed: ' + (e as Error).message + "</span>"
   }
 }
+
+loadLibrary()

@@ -36,12 +36,16 @@
     <h1>lector — karaoke audiobook reader</h1>
 
     <div class="card">
-      <h2>▶ Play a pre-rendered audiobook</h2>
-      <p class="hint">Load an audio file and its <code>.ass</code> (from the native render pipeline). Full seek, no stalls.</p>
-      <div class="row">
-        <label>audio <input id="ab-audio-file" type="file" accept="audio/*,.m4b,.m4a,.mp3,.wav" /></label>
-        <label>.ass <input id="ab-ass-file" type="file" accept=".ass,text/plain" /></label>
-      </div>
+      <h2>▶ Audiobook</h2>
+      <p class="hint">Render a book with <code>bun render.mjs your.pdf</code>, then click it below. Full seek, no stalls.</p>
+      <div id="ab-books" class="row"></div>
+      <details>
+        <summary class="hint" style="cursor:pointer">or load files manually</summary>
+        <div class="row">
+          <label>audio <input id="ab-audio-file" type="file" accept="audio/*,.m4b,.m4a,.mp3,.wav" /></label>
+          <label>.ass <input id="ab-ass-file" type="file" accept=".ass,text/plain" /></label>
+        </div>
+      </details>
       <div id="ab-status">load an audio file and a .ass file</div>
       <audio id="ab-audio" controls></audio>
       <div id="ab-reader"></div>

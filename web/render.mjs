@@ -3,21 +3,27 @@
 // .ass matches exactly) but runs onnxruntime *natively* (~5x faster than realtime
 // vs the browser's ~0.25x), which is the whole point of rendering off-browser.
 //
-//   bun render.mjs <input.pdf> [outBase=book] [voice=bm_george] [lang=b]
+//   bun render.mjs <input.pdf> [voice=bm_george] [lang=b]
 //
+// Writes public/books/<slug>/audio.{mp3,wav} + book.ass and updates
+// public/books/index.json, so the web app lists it and you just click to play.
 // Needs the vendored assets (bash vendor.sh): public/models, public/voices,
 // public/tokenizer.
 import * as pdfjs from "pdfjs-dist/legacy/build/pdf.mjs"
 import * as lector from "./src/core/lector.js"
 import { phonemize } from "phonemizer"
 import * as ort from "onnxruntime-node"
-import { readFileSync, writeFileSync } from "node:fs"
+import { readFileSync, writeFileSync, mkdirSync, existsSync, rmSync } from "node:fs"
+import { basename } from "node:path"
+import { execFileSync } from "node:child_process"
 
-const [pdfPath, outBase = "book", voiceName = "bm_george", lang = "b"] = process.argv.slice(2)
+const [pdfPath, voiceName = "bm_george", lang = "b"] = process.argv.slice(2)
 if (!pdfPath) {
-  console.error("usage: bun render.mjs <input.pdf> [outBase] [voice] [lang]")
+  console.error("usage: bun render.mjs <input.pdf> [voice=bm_george] [lang=b]")
   process.exit(1)
 }
+const title = basename(pdfPath).replace(/\.[^.]+$/, "")
+const slug = title.replace(/[^a-z0-9]+/gi, "-").toLowerCase().replace(/(^-|-$)/g, "") || "book"
 const espeak = lang === "b" ? "en-gb" : "en-us"
 const SR = 24000
 
@@ -114,6 +120,43 @@ function wav(samples, sr) {
   }
   return buf
 }
-writeFileSync(`${outBase}.wav`, wav(full, SR))
-writeFileSync(`${outBase}.ass`, lector.to_ass(merged, 12))
-console.log(`wrote ${outBase}.wav (${(full.length / SR).toFixed(0)}s) + ${outBase}.ass (${merged.length} words)`)
+const dir = `public/books/${slug}`
+mkdirSync(dir, { recursive: true })
+writeFileSync(`${dir}/book.ass`, lector.to_ass(merged, 12))
+writeFileSync(`${dir}/audio.wav`, wav(full, SR))
+
+// compress to mp3 if ffmpeg is around (a whole-book WAV is gigabytes); else keep wav
+let audioFile = "audio.wav"
+try {
+  execFileSync("ffmpeg", ["-y", "-i", `${dir}/audio.wav`, "-b:a", "64k", `${dir}/audio.mp3`], {
+    stdio: "ignore",
+  })
+  rmSync(`${dir}/audio.wav`)
+  audioFile = "audio.mp3"
+} catch {
+  console.warn("(ffmpeg not found; keeping .wav — large for long books)")
+}
+
+// update the manifest the web app lists from
+const manifestPath = "public/books/index.json"
+let manifest = []
+if (existsSync(manifestPath)) {
+  try {
+    manifest = JSON.parse(readFileSync(manifestPath, "utf8"))
+  } catch {
+    /* ignore */
+  }
+}
+manifest = manifest.filter((b) => b.slug !== slug)
+manifest.unshift({
+  slug,
+  title,
+  audio: audioFile,
+  seconds: Math.round(full.length / SR),
+  words: merged.length,
+})
+writeFileSync(manifestPath, JSON.stringify(manifest, null, 2))
+
+const mins = (full.length / SR / 60).toFixed(0)
+console.log(`done: "${title}" (${mins} min, ${merged.length} words)`)
+console.log(`-> open http://localhost:5173 and click "${title}"`)
