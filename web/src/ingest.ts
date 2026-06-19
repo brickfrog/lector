@@ -14,9 +14,10 @@ export interface Ingested {
 }
 
 export async function ingestPdf(src: string | ArrayBuffer): Promise<Ingested> {
-  const doc = await pdfjs.getDocument(
-    typeof src === "string" ? { url: src } : { data: src },
-  ).promise
+  const doc = await pdfjs.getDocument({
+    ...(typeof src === "string" ? { url: src } : { data: src }),
+    verbosity: 0, // errors only; we extract text, not render fonts
+  }).promise
 
   const paragraphs: string[] = []
   for (let p = 1; p <= doc.numPages; p++) {

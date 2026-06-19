@@ -29,7 +29,14 @@ const SR = 24000
 
 // --- 1. extract + clean + chunk (identical to ingest.ts) ---
 const data = new Uint8Array(readFileSync(pdfPath))
-const doc = await pdfjs.getDocument({ data, useWorkerFetch: false, isEvalSupported: false }).promise
+// verbosity:0 = errors only (silences the harmless per-page standardFontDataUrl
+// warning; we only extract text, never render fonts).
+const doc = await pdfjs.getDocument({
+  data,
+  useWorkerFetch: false,
+  isEvalSupported: false,
+  verbosity: 0,
+}).promise
 const paragraphs = []
 for (let p = 1; p <= doc.numPages; p++) {
   const page = await doc.getPage(p)
