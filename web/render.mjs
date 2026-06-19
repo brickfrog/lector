@@ -52,10 +52,35 @@ for (let p = 1; p <= doc.numPages; p++) {
   for (const para of lector.page_paragraphs(spans, body * 0.85)) paragraphs.push(para)
 }
 const chunks = lector.sentence_pack(paragraphs, 300)
-console.log(`${doc.numPages} pages -> ${paragraphs.length} paragraphs -> ${chunks.length} chunks`)
 
-// --- 2. model + vocab + voice ---
+// --- 2. vocab (needed to count tokens), then enforce Kokoro's ~510-token cap ---
 const vocab = JSON.parse(readFileSync("public/tokenizer/tokenizer.json", "utf8")).model.vocab
+const tokenLen = (phon) => [...phon].reduce((n, c) => n + (vocab[c] !== undefined ? 1 : 0), 0)
+
+// A char budget is only a proxy; the model hard-caps at ~510 phoneme tokens
+// (its bert position embeddings). Split any unit that actually exceeds it,
+// halving on word boundaries until every piece fits. Bulletproof: uses the real
+// phonemizer, not a heuristic.
+const MAX_TOKENS = 500
+async function splitToLimit(text) {
+  const phon = (await phonemize(text, espeak)).join(" ")
+  if (tokenLen(phon) <= MAX_TOKENS) return [text]
+  const words = text.trim().split(/\s+/)
+  if (words.length <= 1) return [text] // unsplittable single token; let it ride
+  const mid = Math.ceil(words.length / 2)
+  const [a, b] = await Promise.all([
+    splitToLimit(words.slice(0, mid).join(" ")),
+    splitToLimit(words.slice(mid).join(" ")),
+  ])
+  return [...a, ...b]
+}
+const units = []
+for (const c of chunks) units.push(...(await splitToLimit(c)))
+console.log(
+  `${doc.numPages} pages -> ${paragraphs.length} paragraphs -> ${chunks.length} chunks -> ${units.length} units`,
+)
+
+// --- model + voice ---
 const vbuf = readFileSync(`public/voices/${voiceName}.bin`)
 const voice = new Float32Array(vbuf.buffer, vbuf.byteOffset, Math.floor(vbuf.byteLength / 4))
 const session = await ort.InferenceSession.create("public/models/kokoro_dur.onnx", {
@@ -68,8 +93,8 @@ const pcms = []
 const perChunkTimed = []
 const durations = []
 const t0 = Date.now()
-for (let i = 0; i < chunks.length; i++) {
-  const text = chunks[i]
+for (let i = 0; i < units.length; i++) {
+  const text = units[i]
   const phonemes = (await phonemize(text, espeak)).join(" ")
   const words = text.trim().split(/\s+/)
   const wordPhonemes = await Promise.all(words.map((w) => phonemize(w, espeak).then((a) => a.join(" "))))
@@ -87,10 +112,10 @@ for (let i = 0; i < chunks.length; i++) {
   pcms.push(waveform)
   perChunkTimed.push(lector.align_words(words, wordPhonemes, phonemes, duration))
   durations.push(waveform.length / SR)
-  if (i % 10 === 0 || i === chunks.length - 1) {
+  if (i % 10 === 0 || i === units.length - 1) {
     const audioS = durations.reduce((a, b) => a + b, 0)
     const wallS = (Date.now() - t0) / 1000
-    process.stdout.write(`\r  chunk ${i + 1}/${chunks.length}  audio ${audioS.toFixed(0)}s  wall ${wallS.toFixed(0)}s  RTF ${(wallS / audioS).toFixed(2)}x   `)
+    process.stdout.write(`\r  unit ${i + 1}/${units.length}  audio ${audioS.toFixed(0)}s  wall ${wallS.toFixed(0)}s  RTF ${(wallS / audioS).toFixed(2)}x   `)
   }
 }
 console.log()
