@@ -12,8 +12,18 @@ const paras = $("paras")
 const reader = $("reader")
 const audio = $("audio") as HTMLAudioElement
 const readBtn = $("read") as HTMLButtonElement
+const bar = $("bar") as HTMLProgressElement
 
 let current: Ingested | null = null
+
+const mb = (n: number) => (n / 1e6).toFixed(0)
+const showBar = () => bar.setAttribute("data-on", "")
+const hideBar = () => bar.removeAttribute("data-on")
+const determinate = (frac: number) => {
+  bar.max = 1
+  bar.value = frac
+}
+const indeterminate = () => bar.removeAttribute("value")
 
 async function loadPdf(src: string | ArrayBuffer) {
   status.textContent = "extracting…"
@@ -38,11 +48,45 @@ async function loadPdf(src: string | ArrayBuffer) {
 }
 
 async function readAlong(text: string) {
-  status.textContent = "loading model + synthesizing (UI stays responsive)…"
   readBtn.disabled = true
+  showBar()
+  indeterminate()
+  let timer = 0
+  const stopTimer = () => {
+    if (timer) {
+      clearInterval(timer)
+      timer = 0
+    }
+  }
   try {
-    await init()
-    const r = await synth(text, "bm_george", "b")
+    await init((p) => {
+      if (p.phase === "download") {
+        if (p.total) {
+          determinate(p.loaded / p.total)
+          status.textContent = `downloading model ${Math.floor((100 * p.loaded) / p.total)}% (${mb(p.loaded)}/${mb(p.total)} MB, one time)`
+        } else {
+          indeterminate()
+          status.textContent = `downloading model ${mb(p.loaded)} MB…`
+        }
+      } else if (p.phase === "compile") {
+        indeterminate()
+        status.textContent = "compiling model…"
+      }
+    })
+    const r = await synth(text, "bm_george", "b", (p) => {
+      if (p.phase === "phonemize") {
+        indeterminate()
+        status.textContent = "phonemizing…"
+      } else if (p.phase === "infer") {
+        indeterminate()
+        const t0 = performance.now()
+        stopTimer()
+        timer = window.setInterval(() => {
+          status.textContent = `synthesizing… ${((performance.now() - t0) / 1000).toFixed(1)}s`
+        }, 100)
+      }
+    })
+    stopTimer()
     const timed = lector.align_words(r.words, r.wordPhonemes, r.phonemes, r.duration)
 
     reader.replaceChildren()
@@ -66,10 +110,13 @@ async function readAlong(text: string) {
     }
     audio.onplay = () => (raf = requestAnimationFrame(tick))
     audio.onpause = () => cancelAnimationFrame(raf)
+    hideBar()
     status.innerHTML = '<span class="ok">ready — press play ✓</span>'
   } catch (e) {
+    hideBar()
     status.innerHTML = '<span class="bad">synth failed: ' + (e as Error).message + "</span>"
   } finally {
+    stopTimer()
     readBtn.disabled = false
   }
 }

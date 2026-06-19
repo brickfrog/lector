@@ -8,6 +8,8 @@
       body { font: 16px/1.6 Georgia, serif; max-width: 64ch; margin: 2rem auto; padding: 0 1rem; color: #222; }
       h1 { font-size: 1.1rem; color: #666; font-weight: normal; }
       #status { color: #888; font-size: 0.85rem; margin: 0.4rem 0; }
+      #bar { width: 100%; height: 6px; margin: 0.3rem 0; display: none; }
+      #bar[data-on] { display: block; }
       .row { display: flex; gap: 0.75rem; align-items: center; margin: 0.75rem 0; flex-wrap: wrap; }
       button { font: inherit; padding: 0.3rem 0.8rem; cursor: pointer; }
       #info { font-size: 0.85rem; color: #555; }
@@ -23,6 +25,7 @@
   <body>
     <h1>lector — PDF → read-along (local Kokoro + MoonBit core)</h1>
     <div id="status">loading…</div>
+    <progress id="bar"></progress>
     <div class="row">
       <button id="sample">Load sample.pdf</button>
       <label>or <input id="file" type="file" accept="application/pdf" /></label>

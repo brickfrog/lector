@@ -10,31 +10,54 @@ export interface SynthResult {
   sampleRate: number
 }
 
+export type Progress =
+  | { phase: "download"; loaded: number; total: number }
+  | { phase: "compile" }
+  | { phase: "phonemize" }
+  | { phase: "infer" }
+
+type OnProgress = (p: Progress) => void
+
 const worker = new Worker(new URL("./worker.ts", import.meta.url), { type: "module" })
 
 let seq = 0
-const pending = new Map<number, { resolve: (v: any) => void; reject: (e: Error) => void }>()
+const pending = new Map<
+  number,
+  { resolve: (v: any) => void; reject: (e: Error) => void; onProgress?: OnProgress }
+>()
 
 worker.onmessage = (e: MessageEvent) => {
-  const { id, ok, r, error } = e.data
+  const { id, ok, r, error, progress } = e.data
   const p = pending.get(id)
   if (!p) return
+  if (progress) {
+    p.onProgress?.(progress)
+    return
+  }
   pending.delete(id)
   ok ? p.resolve(r) : p.reject(new Error(error))
 }
 
-function call<T>(type: string, args: Record<string, unknown> = {}): Promise<T> {
+function call<T>(
+  type: string,
+  args: Record<string, unknown> = {},
+  onProgress?: OnProgress,
+): Promise<T> {
   return new Promise((resolve, reject) => {
     const id = ++seq
-    pending.set(id, { resolve, reject })
+    pending.set(id, { resolve, reject, onProgress })
     worker.postMessage({ id, type, ...args })
   })
 }
 
-export const init = () => call<void>("init")
+export const init = (onProgress?: OnProgress) => call<void>("init", {}, onProgress)
 
-export const synth = (text: string, voice = "bm_george", lang: "a" | "b" = "b") =>
-  call<SynthResult>("synth", { text, voice, lang })
+export const synth = (
+  text: string,
+  voice = "bm_george",
+  lang: "a" | "b" = "b",
+  onProgress?: OnProgress,
+) => call<SynthResult>("synth", { text, voice, lang }, onProgress)
 
 export function gpuAvailable(): boolean {
   return typeof (navigator as any).gpu !== "undefined"
