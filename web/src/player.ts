@@ -99,6 +99,7 @@ export class Reader {
     this.idx = i
     try {
       if (!this.started) {
+        this.hooks.onStatus?.("loading model…")
         await init((p) => this.hooks.onProgress?.(p))
         this.started = true
       }

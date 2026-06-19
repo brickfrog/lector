@@ -38,6 +38,18 @@ worker.onmessage = (e: MessageEvent) => {
   ok ? p.resolve(r) : p.reject(new Error(error))
 }
 
+// A worker that fails to load (bad import, wasm threading misconfig) otherwise
+// dies silently and every call() hangs forever. Surface it and reject pending.
+function failAll(msg: string) {
+  console.error("[worker]", msg)
+  for (const [id, p] of pending) {
+    p.reject(new Error(msg))
+    pending.delete(id)
+  }
+}
+worker.onerror = (e) => failAll(`worker error: ${e.message || "failed to load"}`)
+worker.onmessageerror = () => failAll("worker message error")
+
 function call<T>(
   type: string,
   args: Record<string, unknown> = {},
