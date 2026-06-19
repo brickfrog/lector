@@ -12,8 +12,4 @@ const coiHeaders = {
 export default defineConfig({
   server: { headers: coiHeaders },
   preview: { headers: coiHeaders },
-  // Vite's esbuild pre-bundling mangles onnxruntime-web's internal worker/wasm
-  // spawning (the threaded build dies on load). Leave it unbundled.
-  optimizeDeps: { exclude: ["onnxruntime-web"] },
-  worker: { format: "es" },
 })

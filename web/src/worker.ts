@@ -5,10 +5,11 @@
 import * as ort from "onnxruntime-web"
 import { phonemize } from "phonemizer"
 
-// Locally-vendored wasm (public/ort/) so cross-origin-isolation/COEP doesn't
-// block a CDN. Multi-threaded when SharedArrayBuffer is available (the vite
-// COOP/COEP headers); falls back to 1 thread otherwise.
-ort.env.wasm.wasmPaths = "/ort/"
+// wasm from the CDN (vite refuses to serve /public files through its module
+// pipeline, which breaks ort's runtime import of its threaded glue .mjs). COEP
+// is credentialless so the cross-origin CDN load still works. Multi-threaded
+// when SharedArrayBuffer is available (the vite COOP/COEP headers).
+ort.env.wasm.wasmPaths = `https://cdn.jsdelivr.net/npm/onnxruntime-web@${ort.env.versions.web}/dist/`
 ort.env.wasm.numThreads = (self as any).crossOriginIsolated
   ? Math.min(navigator.hardwareConcurrency || 4, 12)
   : 1
@@ -60,7 +61,18 @@ async function init(id: number) {
     off += c.length
   }
   progress(id, { phase: "compile" })
-  session = await ort.InferenceSession.create(bytes, { executionProviders: ["wasm"] })
+  try {
+    session = await ort.InferenceSession.create(bytes, { executionProviders: ["wasm"] })
+  } catch (e) {
+    // if threaded init fails (pthread spawn), retry single-threaded rather than die
+    if ((ort.env.wasm.numThreads ?? 1) > 1) {
+      console.warn("[ort] threaded init failed; retrying single-threaded", e)
+      ort.env.wasm.numThreads = 1
+      session = await ort.InferenceSession.create(bytes, { executionProviders: ["wasm"] })
+    } else {
+      throw e
+    }
+  }
 }
 
 function tokenize(phonemes: string): number[] {
