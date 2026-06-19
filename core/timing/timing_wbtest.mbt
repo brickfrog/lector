@@ -72,3 +72,45 @@ test "join_timestamps golden parity" {
     assert_true(approx(timed[k].end_s, exp_end[k]))
   }
 }
+
+///|
+test "align_words: clean 1:1 is complete, monotonic, anchored" {
+  let words = ["the", "cat", "sat"]
+  let wph = ["ðə", "kat", "sat"]
+  let phonemes = "ðə kat sat"
+  // BOS + (ð ə _ k a t _ s a t) + EOS
+  let pred = [3, 5, 5, 4, 6, 6, 6, 4, 7, 7, 7, 3]
+  let out = align_words(words, wph, phonemes, pred)
+  assert_eq(out.length(), 3)
+  assert_eq(out[0].text, "the")
+  assert_eq(out[2].text, "sat")
+  // first word anchored at 0, last word ends at the group timeline end (~1.425)
+  assert_true(approx(out[0].start_s, 0.0))
+  assert_true(out[2].end_s > 1.4 && out[2].end_s < 1.45)
+  // monotonic, every word has nonneg duration
+  for k in 0..<out.length() {
+    assert_true(out[k].start_s <= out[k].end_s)
+  }
+  assert_true(out[0].end_s <= out[1].start_s + 0.001)
+  assert_true(out[1].end_s <= out[2].start_s + 0.001)
+}
+
+///|
+test "align_words: function-word merge keeps every word (regression)" {
+  // espeak merges "of a" -> one group "əvə"; the old positional zip padded the
+  // trailing words with empty phonemes and join_timestamps then dropped them.
+  let words = ["of", "a", "cat"]
+  let wph = ["ˈʌv", "ˈeɪ", "kˈæt"] // per-word phonemes (isolated, stressed)
+  let phonemes = "əvə kˈæt" // in-context: of+a fused, no internal space
+  // BOS + (ə v ə _ k ˈ æ t) + EOS
+  let pred = [3, 5, 5, 5, 4, 6, 1, 6, 6, 3]
+  let out = align_words(words, wph, phonemes, pred)
+  assert_eq(out.length(), 3) // nothing dropped
+  assert_eq(out[0].text, "of")
+  assert_eq(out[1].text, "a")
+  assert_eq(out[2].text, "cat")
+  // monotonic and anchored
+  assert_true(out[0].start_s <= out[1].start_s)
+  assert_true(out[1].start_s <= out[2].start_s)
+  assert_true(out[2].end_s > out[0].start_s)
+}

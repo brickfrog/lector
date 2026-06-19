@@ -48,6 +48,19 @@ pub fn join_timestamps(
 }
 
 ///|
+/// Robust display-word timing for the espeak host path: maps words onto the exact
+/// per-group pred_dur timeline by phoneme-length proportion. Tolerant of espeak's
+/// function-word merges and number expansions; never drops or desyncs words.
+pub fn align_words(
+  words : Array[String],
+  word_phonemes : Array[String],
+  phonemes : String,
+  pred_dur : Array[Int],
+) -> Array[@ir.TimedToken] {
+  @timing.align_words(words, word_phonemes, phonemes, pred_dur)
+}
+
+///|
 /// Format seconds as an ASS "H:MM:SS.cc" timestamp.
 pub fn fmt_time(t : Double) -> String {
   @timing.fmt_time(t)

@@ -17,6 +17,7 @@ options(
         "page_paragraphs",
         "detect_body_size",
         "join_timestamps",
+        "align_words",
         "fmt_time",
         "split_lines",
         "to_ass",

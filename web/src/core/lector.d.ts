@@ -36,6 +36,13 @@ export function join_timestamps(
   pred_dur : number[],
 ) : TimedToken[]
 
+export function align_words(
+  words : string[],
+  word_phonemes : string[],
+  phonemes : string,
+  pred_dur : number[],
+) : TimedToken[]
+
 export function fmt_time(t : number) : string
 
 export function split_lines(words : string[], max_words : number) : string[][]

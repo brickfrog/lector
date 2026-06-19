@@ -2,7 +2,6 @@
 // of the first chunk (Kokoro synth in the worker + word-synced highlight).
 import * as lector from "./core/lector.js"
 import { init, synth } from "./bridge.js"
-import { buildTokens } from "./align.js"
 import { encodeWav } from "./wav.js"
 import { ingestPdf, type Ingested } from "./ingest.js"
 
@@ -44,8 +43,7 @@ async function readAlong(text: string) {
   try {
     await init()
     const r = await synth(text, "bm_george", "b")
-    const tokens = buildTokens(text, r.phonemes)
-    const timed = lector.join_timestamps(tokens, r.duration)
+    const timed = lector.align_words(r.words, r.wordPhonemes, r.phonemes, r.duration)
 
     reader.replaceChildren()
     const spans: HTMLSpanElement[] = timed.map((t: any) => {

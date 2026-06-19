@@ -37,7 +37,14 @@ function tokenize(phonemes: string): number[] {
 
 async function synth(text: string, voice: string, lang: "a" | "b") {
   if (!session || !vocab) throw new Error("not initialized")
-  const phonemes = (await phonemize(text, lang === "b" ? "en-gb" : "en-us")).join(" ")
+  const espeakLang = lang === "b" ? "en-gb" : "en-us"
+  // whole-string phonemes drive synthesis (correct prosody / function-word
+  // reduction); per-word phonemes are only an alignment guide for the read-along.
+  const phonemes = (await phonemize(text, espeakLang)).join(" ")
+  const words = text.trim().split(/\s+/)
+  const wordPhonemes = await Promise.all(
+    words.map((w) => phonemize(w, espeakLang).then((a) => a.join(" "))),
+  )
   const inputIds = tokenize(phonemes)
   const len = inputIds.length
   const buf = await (await fetch(voiceUrl(voice))).arrayBuffer()
@@ -52,7 +59,7 @@ async function synth(text: string, voice: string, lang: "a" | "b") {
   const out = await session.run(feeds)
   const duration = Array.from(out.duration.data as ArrayLike<bigint | number>).map(Number)
   const waveform = Float32Array.from(out.waveform.data as Float32Array)
-  return { phonemes, inputIds, duration, waveform, sampleRate: 24000 }
+  return { phonemes, words, wordPhonemes, inputIds, duration, waveform, sampleRate: 24000 }
 }
 
 self.onmessage = async (e: MessageEvent) => {

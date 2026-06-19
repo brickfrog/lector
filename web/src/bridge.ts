@@ -2,6 +2,8 @@
 
 export interface SynthResult {
   phonemes: string
+  words: string[]
+  wordPhonemes: string[]
   inputIds: number[]
   duration: number[]
   waveform: Float32Array
