@@ -5,7 +5,16 @@
 import * as ort from "onnxruntime-web"
 import { phonemize } from "phonemizer"
 
-ort.env.wasm.wasmPaths = `https://cdn.jsdelivr.net/npm/onnxruntime-web@${ort.env.versions.web}/dist/`
+// Locally-vendored wasm (public/ort/) so cross-origin-isolation/COEP doesn't
+// block a CDN. Multi-threaded when SharedArrayBuffer is available (the vite
+// COOP/COEP headers); falls back to 1 thread otherwise.
+ort.env.wasm.wasmPaths = "/ort/"
+ort.env.wasm.numThreads = (self as any).crossOriginIsolated
+  ? Math.min(navigator.hardwareConcurrency || 4, 12)
+  : 1
+console.log(
+  `[ort] crossOriginIsolated=${(self as any).crossOriginIsolated} numThreads=${ort.env.wasm.numThreads}`,
+)
 
 // Single fp32 on WASM. The full matrix we actually measured on this hardware:
 //   q8 / fp16            -> silent (ort-web can't run quantized/half Kokoro)

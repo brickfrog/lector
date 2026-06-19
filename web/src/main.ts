@@ -46,6 +46,8 @@ audio.onplay = () => {
   raf = requestAnimationFrame(tick)
 }
 audio.onpause = () => cancelAnimationFrame(raf)
+// single owner of auto-advance: always the current player (no stale listeners)
+audio.onended = () => player?.next()
 
 // --- progress / status timer for the chunk the user is waiting on ---
 let timer = 0

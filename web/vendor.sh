@@ -18,4 +18,11 @@ fi
 echo "voice + tokenizer…"
 curl -sL --retry 5 -o public/voices/bm_george.bin "$base/voices/bm_george.bin"
 curl -sL --retry 5 -o public/tokenizer/tokenizer.json "$base/tokenizer.json"
+
+# onnxruntime-web wasm, served same-origin so cross-origin isolation can run it
+# multi-threaded (and so the app works offline).
+echo "onnxruntime-web wasm…"
+mkdir -p public/ort
+cp node_modules/onnxruntime-web/dist/*.wasm public/ort/
+cp node_modules/onnxruntime-web/dist/*.mjs public/ort/
 echo "done."

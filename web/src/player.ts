@@ -37,7 +37,8 @@ export class Reader {
     private lang: "a" | "b",
     private hooks: ReaderHooks = {},
   ) {
-    this.audio.addEventListener("ended", () => this.next())
+    // NB: the "ended" -> next() wiring lives in main.ts against the *current*
+    // player, so a replaced Reader (new document) can't keep driving the audio.
   }
 
   get total() {
