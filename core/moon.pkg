@@ -13,6 +13,7 @@ options(
       "format": "esm",
       "exports": [
         "pack",
+        "sentence_pack",
         "page_paragraphs",
         "detect_body_size",
         "join_timestamps",

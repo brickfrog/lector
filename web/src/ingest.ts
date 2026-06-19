@@ -37,6 +37,9 @@ export async function ingestPdf(src: string | ArrayBuffer): Promise<Ingested> {
     }
   }
 
-  const chunks = lector.pack(paragraphs, 8000)
+  // Kokoro caps at ~510 phoneme tokens; sentence-pack to ~300 chars stays well
+  // under that (English runs ~1.3 phonemes/char). pack(8000) was for the server
+  // engine and overflows the model's bert position embeddings.
+  const chunks = lector.sentence_pack(paragraphs, 300)
   return { numPages: doc.numPages, paragraphs, chunks }
 }

@@ -29,6 +29,8 @@ export function detect_body_size(spans : Span[]) : number
 
 export function pack(paras : string[], max_chars : number) : string[]
 
+export function sentence_pack(paras : string[], max_chars : number) : string[]
+
 export function join_timestamps(
   tokens : Token[],
   pred_dur : number[],

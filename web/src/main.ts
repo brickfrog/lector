@@ -81,6 +81,11 @@ async function readAlong(text: string) {
   const f = (e.target as HTMLInputElement).files?.[0]
   if (f) loadPdf(await f.arrayBuffer())
 }
-readBtn.onclick = () => current && readAlong(current.chunks[0])
+readBtn.onclick = () => {
+  if (!current) return
+  // skip bare headings; read the first chunk with real prose in it
+  const chunk = current.chunks.find((c) => c.length > 40) ?? current.chunks[0]
+  readAlong(chunk)
+}
 
 loadPdf("/sample.pdf") // auto-load on start

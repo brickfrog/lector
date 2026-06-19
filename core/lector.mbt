@@ -32,6 +32,13 @@ pub fn pack(paras : Array[String], max_chars : Int) -> Array[String] {
 }
 
 ///|
+/// Sentence-level packing for short-input TTS (Kokoro caps at ~510 phonemes):
+/// splits paragraphs into sentences, packs to <= max_chars per chunk.
+pub fn sentence_pack(paras : Array[String], max_chars : Int) -> Array[String] {
+  @chunk.sentence_pack(paras, max_chars)
+}
+
+///|
 /// Per-phoneme pred_dur frames -> per-word timestamps (seconds).
 pub fn join_timestamps(
   tokens : Array[@ir.Token],
