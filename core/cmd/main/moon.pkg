@@ -1,9 +1,0 @@
-import {
-  "brickfrog/lector",
-  "brickfrog/lector/ir",
-  "moonbitlang/core/json",
-}
-
-options(
-  "is-main": true,
-)

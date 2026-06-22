@@ -1,23 +1,20 @@
-# lector monorepo — top-level tasks. `just <task>` (run `just` to list).
+# lector — tasks. `just <task>` (run `just` to list).
 
 default:
     @just --list
 
-# core (MoonBit): run unit + golden tests
-test-core:
-    cd core && moon test
+# build the release binary
+build:
+    cargo build --release
 
-# core: format + typecheck
-check-core:
-    cd core && moon fmt && moon check
+# render a PDF to an audiobook (mp3 + .ass). usage: just render book.pdf [outdir]
+render pdf outdir=".":
+    cargo run --release -- {{pdf}} {{outdir}}
 
-# core: build for the JS backend (browser-host readiness)
-build-core-js:
-    cd core && moon build --target js
+# fetch voice + tokenizer into assets/ (model: see scripts/export_dur.py)
+vendor:
+    bash scripts/vendor.sh
 
-# core: run the JSON -> ASS demo harness
-demo:
-    cd core && moon run cmd/main
-
-# everything currently wired
-ci: check-core test-core build-core-js
+# format + lint
+check:
+    cargo fmt && cargo clippy

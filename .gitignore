@@ -1,21 +1,13 @@
-# --- build / deps ---
-_build/
-target/
-.mooncakes/
-.moonagent/
-node_modules/
-__pycache__/
-.venv/
-*.pyc
+# rust
+/target/
 
-# --- caches & sandbox scratch ---
-.tts_cache/
-.repair_cache/
-.torch/
-.xdgcache/
+# vendored assets (model / voice / tokenizer: large and/or licensed)
+/assets/
 
-# --- large / derived / COPYRIGHTED media: never commit ---
-# (source books and generated audiobooks are not ours to redistribute)
+# render checkpoints
+*.ckpt/
+
+# generated audiobooks, model artifacts, source books (large or copyrighted)
 *.pdf
 *.epub
 *.mp3
@@ -23,29 +15,13 @@ __pycache__/
 *.wav
 *.m4b
 *.ass
-audio/
-
-# --- pipeline scratch ---
-chapters.txt
-concat.txt
-pages.json
-
-# --- OS ---
-.DS_Store
-
-# NOTE: core/testdata/*.json is intentionally tracked (tiny, our own golden fixture).
-!core/testdata/*.json
-
-# extracted/repaired book prose — copyrighted intermediate artifacts
-text/
-
-# web
-web/node_modules/
-web/dist/
-web/src/core/lector.js
-
-# model artifacts
 *.onnx
 *.onnx_data
-web/public/models/
-web/public/
+
+# legacy python pipeline + its outputs (kept on disk, not part of the rust project)
+/reference/
+
+# OS / misc
+.DS_Store
+__pycache__/
+*.pyc

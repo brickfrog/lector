@@ -1,42 +1,53 @@
 # lector
 
-Turns a book (PDF or EPUB) into a karaoke audiobook: synthesized narration with
-the words highlighted as they're spoken. Runs locally, no per-use cost.
+Turn a PDF into a karaoke audiobook: a single audio file plus a word-synced
+`.ass` subtitle track. Play it in mpv (it renders the karaoke) or any player.
 
-Monorepo with components in a few languages. They share one data format: a list
-of `{text, phonemes, whitespace}` tokens plus the TTS model's per-phoneme frame
-durations (`pred_dur`). Word timings come straight from those durations, so there
-is no separate forced-alignment step. Kokoro already computes the durations while
-it synthesizes.
+One static binary. Synthesis runs natively via onnxruntime, around four times
+faster than realtime, and long renders are resumable.
+
+## How it works
+
+```
+PDF --pdftotext--> spans --clean--> paragraphs --pack--> sentence units
+    --espeak-ng--> phonemes --Kokoro (onnxruntime)--> waveform + per-phoneme
+    durations --align--> per-word timestamps --> mp3 + karaoke .ass
+```
+
+Word timing falls out of synthesis: the Kokoro duration model emits a frame
+count per phoneme, so there is no separate forced aligner. The cleaner uses
+per-word box height (a font-size proxy) to drop footnotes, headers, and page
+numbers, dehyphenate line breaks, and reflow paragraphs.
+
+## Requirements
+
+- Rust (stable)
+- `espeak-ng`, `pdftotext` (poppler), `ffmpeg` on PATH
+- onnxruntime (the `ort` crate links the system lib or downloads one)
+- `assets/`: `kokoro_dur.onnx`, `bm_george.bin`, `tokenizer.json`
+  (`just vendor` fetches the voice + tokenizer; the model is built by
+  `scripts/export_dur.py`)
+
+## Use
+
+```
+just build
+just render path/to/book.pdf out/        # -> out/book.mp3 + out/book.ass
+mpv --sub-file=out/book.ass out/book.mp3
+```
+
+`lector <input.pdf> [outDir=.] [voice=bm_george] [lang=a|b]` (a = en-us,
+b = en-gb).
+
+## Resumable
+
+Every unit's audio and word timings are committed to a `.<slug>.ckpt` directory
+as it finishes. If a render is killed, re-run the same command: it replays the
+checkpoint and continues from where it stopped, producing output identical to an
+uninterrupted run. The checkpoint is removed on success.
 
 ## Layout
 
-| dir | what | language | status |
-|-----|------|----------|--------|
-| `core/` | `brickfrog/lector`. The logic library: paragraph chunking, `pred_dur` to word timestamps, ASS karaoke output, book-timeline assembly. Pure functions, no I/O or model code. Builds for JS and native. | MoonBit | tested, 9/9 |
-| `reference/` | The Python pipeline the core was ported from, and where the test fixtures come from. Extract, glyph-repair via LLM, Kokoro TTS, alignment, ASS, chaptered M4B. Sandboxed with bubblewrap and memory caps. | Python | working |
-| `web/` | Browser app: core compiled to JS, plus kokoro-js and JASSUB. | TS | not started |
-| `bridge/` | Pulls `(tokens, pred_dur)` out of Kokoro to feed the core. | TS or Py | not started |
-
-## Running core
-
-```sh
-cd core
-moon test               # unit tests + the golden fixture
-moon run cmd/main       # decode a JSON fixture, print the ASS
-moon build --target js  # JS backend build
-```
-
-## Notes
-
-`core` takes data and returns strings. It does not read files, run models, or mux
-audio. That work belongs to the host: `reference/` does it today, `web/` and
-`bridge/` will later.
-
-The timestamp math in `core` is checked against a Kokoro-generated fixture
-(`core/testdata/sentence.json`) and matches the Python output to within 2 ms.
-
-Source books and generated audio are not in the repo. They're copyrighted and
-large, and `.gitignore` blocks them. Bring your own input.
-
-Not on mooncakes yet.
+- `src/` Rust: `pdf`, `clean`, `chunk`, `synth`, `timing`, `ass`, `main`
+- `scripts/` model export (`export_dur.py`) + asset vendor
+- `assets/` model / voice / tokenizer (not committed)

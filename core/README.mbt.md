@@ -1,1 +1,0 @@
-# brickfrog/lector
