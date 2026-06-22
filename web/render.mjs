@@ -13,9 +13,11 @@ import * as pdfjs from "pdfjs-dist/legacy/build/pdf.mjs"
 import * as lector from "./src/core/lector.js"
 import { phonemize } from "phonemizer"
 import * as ort from "onnxruntime-node"
-import { readFileSync, writeFileSync, mkdirSync, existsSync, rmSync } from "node:fs"
+import { readFileSync, writeFileSync, mkdirSync, existsSync, rmSync, createWriteStream, createReadStream } from "node:fs"
 import { basename } from "node:path"
 import { execFileSync } from "node:child_process"
+import { once } from "node:events"
+import { pipeline } from "node:stream/promises"
 
 const [pdfPath, voiceName = "bm_george", lang = "b"] = process.argv.slice(2)
 if (!pdfPath) {
@@ -88,10 +90,26 @@ const session = await ort.InferenceSession.create("public/models/kokoro_dur.onnx
   intraOpNumThreads: 8,
 })
 
-// --- 3. synth every chunk (native ORT), align words via the core ---
-const pcms = []
+// --- 3. synth every unit (native ORT), STREAM audio to disk, align via core ---
+// A whole book is hours of audio = gigabytes of PCM; we must not hold it in RAM.
+// Stream raw s16le to a temp file (constant memory) and let ffmpeg encode it.
+const dir = `public/books/${slug}`
+mkdirSync(dir, { recursive: true })
+const pcmPath = `${dir}/audio.s16`
+const pcmStream = createWriteStream(pcmPath)
+
+function f32toS16(f32) {
+  const b = Buffer.allocUnsafe(f32.length * 2)
+  for (let i = 0; i < f32.length; i++) {
+    const s = Math.max(-1, Math.min(1, f32[i]))
+    b.writeInt16LE((s < 0 ? s * 0x8000 : s * 0x7fff) | 0, i * 2)
+  }
+  return b
+}
+
 const perChunkTimed = []
 const durations = []
+let totalSamples = 0
 const t0 = Date.now()
 for (let i = 0; i < units.length; i++) {
   const text = units[i]
@@ -108,65 +126,56 @@ for (let i = 0; i < units.length; i++) {
     speed: new ort.Tensor("int32", Int32Array.from([1]), [1]),
   })
   const duration = Array.from(out.duration.data).map(Number)
-  const waveform = Float32Array.from(out.waveform.data)
-  pcms.push(waveform)
+  const waveform = out.waveform.data // Float32Array view
+  if (!pcmStream.write(f32toS16(waveform))) await once(pcmStream, "drain") // backpressure
   perChunkTimed.push(lector.align_words(words, wordPhonemes, phonemes, duration))
   durations.push(waveform.length / SR)
+  totalSamples += waveform.length
   if (i % 10 === 0 || i === units.length - 1) {
-    const audioS = durations.reduce((a, b) => a + b, 0)
+    const audioS = totalSamples / SR
     const wallS = (Date.now() - t0) / 1000
     process.stdout.write(`\r  unit ${i + 1}/${units.length}  audio ${audioS.toFixed(0)}s  wall ${wallS.toFixed(0)}s  RTF ${(wallS / audioS).toFixed(2)}x   `)
   }
 }
+pcmStream.end()
+await once(pcmStream, "finish")
 console.log()
 
-// --- 4. merge timeline + concat audio (core does the offset math) ---
+// --- 4. timeline (.ass) + encode the streamed PCM ---
 const merged = lector.merge_timed(perChunkTimed, durations)
-const total = pcms.reduce((a, p) => a + p.length, 0)
-const full = new Float32Array(total)
-let o = 0
-for (const p of pcms) {
-  full.set(p, o)
-  o += p.length
-}
-
-// --- 5. write WAV (16-bit PCM) + .ass ---
-function wav(samples, sr) {
-  const buf = Buffer.alloc(44 + samples.length * 2)
-  buf.write("RIFF", 0)
-  buf.writeUInt32LE(36 + samples.length * 2, 4)
-  buf.write("WAVE", 8)
-  buf.write("fmt ", 12)
-  buf.writeUInt32LE(16, 16)
-  buf.writeUInt16LE(1, 20)
-  buf.writeUInt16LE(1, 22)
-  buf.writeUInt32LE(sr, 24)
-  buf.writeUInt32LE(sr * 2, 28)
-  buf.writeUInt16LE(2, 32)
-  buf.writeUInt16LE(16, 34)
-  buf.write("data", 36)
-  buf.writeUInt32LE(samples.length * 2, 40)
-  for (let i = 0; i < samples.length; i++) {
-    const s = Math.max(-1, Math.min(1, samples[i]))
-    buf.writeInt16LE((s < 0 ? s * 0x8000 : s * 0x7fff) | 0, 44 + i * 2)
-  }
-  return buf
-}
-const dir = `public/books/${slug}`
-mkdirSync(dir, { recursive: true })
 writeFileSync(`${dir}/book.ass`, lector.to_ass(merged, 12))
-writeFileSync(`${dir}/audio.wav`, wav(full, SR))
 
-// compress to mp3 if ffmpeg is around (a whole-book WAV is gigabytes); else keep wav
-let audioFile = "audio.wav"
+let audioFile = "audio.mp3"
 try {
-  execFileSync("ffmpeg", ["-y", "-i", `${dir}/audio.wav`, "-b:a", "64k", `${dir}/audio.mp3`], {
-    stdio: "ignore",
-  })
-  rmSync(`${dir}/audio.wav`)
-  audioFile = "audio.mp3"
+  // ffmpeg reads the raw PCM file directly (no big buffer in our process)
+  execFileSync(
+    "ffmpeg",
+    ["-y", "-f", "s16le", "-ar", String(SR), "-ac", "1", "-i", pcmPath, "-b:a", "64k", `${dir}/audio.mp3`],
+    { stdio: "ignore" },
+  )
+  rmSync(pcmPath)
 } catch {
-  console.warn("(ffmpeg not found; keeping .wav — large for long books)")
+  // no ffmpeg: wrap the PCM into a .wav by streaming (header + copy, low memory)
+  const dataLen = totalSamples * 2
+  const h = Buffer.alloc(44)
+  h.write("RIFF", 0)
+  h.writeUInt32LE(36 + dataLen, 4)
+  h.write("WAVE", 8)
+  h.write("fmt ", 12)
+  h.writeUInt32LE(16, 16)
+  h.writeUInt16LE(1, 20)
+  h.writeUInt16LE(1, 22)
+  h.writeUInt32LE(SR, 24)
+  h.writeUInt32LE(SR * 2, 28)
+  h.writeUInt16LE(2, 32)
+  h.writeUInt16LE(16, 34)
+  h.write("data", 36)
+  h.writeUInt32LE(dataLen, 40)
+  writeFileSync(`${dir}/audio.wav`, h)
+  await pipeline(createReadStream(pcmPath), createWriteStream(`${dir}/audio.wav`, { flags: "a" }))
+  rmSync(pcmPath)
+  audioFile = "audio.wav"
+  console.warn("(ffmpeg not found; wrote .wav — large for long books)")
 }
 
 // update the manifest the web app lists from
@@ -184,11 +193,11 @@ manifest.unshift({
   slug,
   title,
   audio: audioFile,
-  seconds: Math.round(full.length / SR),
+  seconds: Math.round(totalSamples / SR),
   words: merged.length,
 })
 writeFileSync(manifestPath, JSON.stringify(manifest, null, 2))
 
-const mins = (full.length / SR / 60).toFixed(0)
+const mins = (totalSamples / SR / 60).toFixed(0)
 console.log(`done: "${title}" (${mins} min, ${merged.length} words)`)
 console.log(`-> open http://localhost:5173 and click "${title}"`)
