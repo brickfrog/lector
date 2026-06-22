@@ -3,8 +3,44 @@
 //! headings drive chapter markers.
 
 use anyhow::{bail, Result};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
+
+fn ext_of(path: &str) -> String {
+    Path::new(path)
+        .extension()
+        .map(|e| e.to_string_lossy().to_ascii_lowercase())
+        .unwrap_or_default()
+}
+
+/// Write the book's cover image into `dest_dir` and return its path, if any.
+/// EPUB: the declared cover. PDF: page 1 rendered with pdftoppm.
+pub fn write_cover(input: &str, dest_dir: &Path) -> Option<PathBuf> {
+    match ext_of(input).as_str() {
+        "epub" => {
+            let (data, mime) = crate::epub::cover(input)?;
+            let ext = if mime.contains("png") { "png" } else { "jpg" };
+            let p = dest_dir.join(format!("cover.{ext}"));
+            std::fs::write(&p, data).ok()?;
+            Some(p)
+        }
+        "pdf" => {
+            let prefix = dest_dir.join("cover"); // pdftoppm appends .png
+            let ok = Command::new("pdftoppm")
+                .args(["-png", "-f", "1", "-l", "1", "-singlefile", "-r", "96"])
+                .arg(input)
+                .arg(&prefix)
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status()
+                .map(|s| s.success())
+                .unwrap_or(false);
+            let png = dest_dir.join("cover.png");
+            (ok && png.exists()).then_some(png)
+        }
+        _ => None,
+    }
+}
 
 pub enum Block {
     Heading(u8, String), // level 1..=3, title text

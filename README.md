@@ -30,7 +30,23 @@ Blocks -> chapters at headings -> sentence units
 Word timing falls out of synthesis: the Kokoro duration model emits a frame
 count per phoneme, so there is no separate forced aligner. Headings (EPUB `<h1>`/
 `<h2>`, or PDF lines notably larger than body text) become chapter markers and
-are still narrated; title and author become file metadata.
+are still narrated; title and author become file metadata; and a cover image (the
+EPUB cover, or PDF page 1) is embedded as album art (mpv and audiobook players
+show it).
+
+## Voices
+
+Pass any vendored Kokoro voice as the 3rd argument; `just vendor` fetches a
+spread (American/British, female/male). The espeak accent is inferred from the
+voice prefix (`a*` -> en-us, `b*` -> en-gb) unless you pass the 4th arg.
+
+```
+lector voices                       # list installed voices
+lector book.epub out/ af_heart      # American female
+lector book.epub out/ bm_lewis      # British male
+```
+
+Any voice from the Kokoro-82M ONNX repo works: drop its `<name>.bin` in `assets/`.
 
 ## Requirements
 

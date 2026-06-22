@@ -8,6 +8,11 @@ use anyhow::{Context, Result};
 use epub::doc::EpubDoc;
 use scraper::{Html, Selector};
 
+/// Cover image bytes + mime, if the EPUB declares one.
+pub fn cover(path: &str) -> Option<(Vec<u8>, String)> {
+    EpubDoc::new(path).ok()?.get_cover()
+}
+
 pub fn load(path: &str) -> Result<Doc> {
     let mut doc = EpubDoc::new(path).context("open epub")?;
     let title = doc.mdata("title").map(|m| m.value.clone());

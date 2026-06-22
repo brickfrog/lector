@@ -62,6 +62,30 @@ fn slugify(s: &str) -> String {
     out.trim_matches('-').to_string()
 }
 
+fn list_voices() {
+    let dir = asset("");
+    let mut v: Vec<String> = vec![];
+    if let Ok(rd) = fs::read_dir(&dir) {
+        for e in rd.flatten() {
+            let p = e.path();
+            if p.extension().is_some_and(|x| x == "bin") {
+                if let Some(stem) = p.file_stem() {
+                    v.push(stem.to_string_lossy().into_owned());
+                }
+            }
+        }
+    }
+    v.sort();
+    if v.is_empty() {
+        println!("no voices in {} (run: just vendor)", dir.display());
+    } else {
+        println!("voices in {}:", dir.display());
+        for n in v {
+            println!("  {n}");
+        }
+    }
+}
+
 fn asset(name: &str) -> PathBuf {
     // assets live next to the executable's crate dir; resolve relative to CWD too
     let exe_rel = Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -173,11 +197,21 @@ fn main() -> Result<()> {
         );
         std::process::exit(1);
     }
+    if args[1] == "voices" {
+        list_voices();
+        return Ok(());
+    }
     let input = fs::canonicalize(&args[1])?.to_string_lossy().into_owned();
     let out_dir = args.get(2).cloned().unwrap_or_else(|| ".".into());
     let voice = args.get(3).cloned().unwrap_or_else(|| "bm_george".into());
-    let lang = args.get(4).map(|s| s.as_str()).unwrap_or("b");
-    let espeak_lang = if lang == "a" { "en-us" } else { "en-gb" };
+    // espeak accent: explicit arg wins, else inferred from the voice prefix
+    // (a* = American voices -> en-us, b* = British -> en-gb)
+    let espeak_lang = match args.get(4).map(|s| s.as_str()) {
+        Some("a") => "en-us",
+        Some("b") => "en-gb",
+        _ if voice.starts_with('a') => "en-us",
+        _ => "en-gb",
+    };
 
     let fname = Path::new(&input)
         .file_stem()
@@ -314,26 +348,29 @@ fn main() -> Result<()> {
     let total = *cum.last().unwrap_or(&0.0);
     let meta_path = ckpt.join("meta.ff");
     fs::write(&meta_path, build_ffmeta(&plan, &cum, total))?;
+    let cover = source::write_cover(&input, &ckpt);
 
-    // encode raw PCM + metadata -> m4b (ipod muxer: AAC + chapters + nav)
+    // encode raw PCM + metadata (+ cover) -> m4b (ipod muxer: AAC + chapters + nav)
     let m4b_path = Path::new(&out_dir).join(format!("{slug}.m4b"));
-    let ff = Command::new("ffmpeg")
-        .args(["-y", "-f", "s16le", "-ar", "24000", "-ac", "1", "-i"])
+    let mut cmd = Command::new("ffmpeg");
+    cmd.args(["-y", "-f", "s16le", "-ar", "24000", "-ac", "1", "-i"])
         .arg(&pcm_path)
         .args(["-f", "ffmetadata", "-i"])
-        .arg(&meta_path)
-        .args([
-            "-map",
-            "0:a",
-            "-map_metadata",
-            "1",
-            "-c:a",
-            "aac",
-            "-b:a",
-            "64k",
-            "-f",
-            "ipod",
-        ])
+        .arg(&meta_path);
+    if let Some(c) = &cover {
+        cmd.arg("-i").arg(c);
+    }
+    cmd.args(["-map", "0:a"]);
+    if cover.is_some() {
+        cmd.args(["-map", "2:v"]);
+    }
+    cmd.args(["-map_metadata", "1", "-c:a", "aac", "-b:a", "64k"]);
+    if cover.is_some() {
+        // cover as attached picture (album art), shown by mpv / audiobook players
+        cmd.args(["-c:v", "mjpeg", "-disposition:v", "attached_pic"]);
+    }
+    let ff = cmd
+        .args(["-f", "ipod"])
         .arg(&m4b_path)
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
