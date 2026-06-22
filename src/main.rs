@@ -1,21 +1,26 @@
-//! lector — render a PDF into a karaoke audiobook (audio + .ass), resumable.
+//! lector — render a book into a chaptered karaoke audiobook (.m4b + .ass).
 //!
-//!   lector <input.pdf> [outDir=.] [voice=bm_george] [lang=a|b]
+//!   lector <book.pdf|.epub|.mobi|...> [outDir=.] [voice=bm_george] [lang=a|b]
 //!
-//! pdftotext extract -> clean -> sentence_pack -> Kokoro synth (onnxruntime,
-//! ~4x realtime) -> per-word timing from pred_dur -> stream PCM -> ffmpeg mp3 +
-//! karaoke .ass. Crash-safe: each unit's audio + timings are committed to a
-//! .ckpt dir as it finishes, so a re-run resumes instead of redoing hours.
+//! source (PDF via pdftotext / EPUB natively / others via ebook-convert) ->
+//! Blocks -> chapters at headings -> sentence_pack -> Kokoro synth (onnxruntime,
+//! ~4x realtime) -> per-word timing from pred_dur -> stream PCM -> ffmpeg m4b
+//! (AAC + chapter markers) + karaoke .ass. Crash-safe: each unit's audio +
+//! timings commit to a .ckpt dir as it finishes, so a re-run resumes instead of
+//! redoing hours.
 
 mod ass;
 mod chunk;
 mod clean;
+mod epub;
 mod pdf;
+mod source;
 mod synth;
 mod timing;
 
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
+use source::Block;
 use std::fs::{self, File, OpenOptions};
 use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};
@@ -31,6 +36,15 @@ const THREADS: usize = 8;
 struct Rec {
     samples: usize,
     timed: Vec<Timed>,
+}
+
+/// Deterministic render plan, cached in the checkpoint so resume is exact.
+#[derive(Serialize, Deserialize)]
+struct Plan {
+    units: Vec<String>,
+    chapters: Vec<(usize, String)>, // (unit index where the chapter starts, title)
+    title: Option<String>,
+    author: Option<String>,
 }
 
 fn slugify(s: &str) -> String {
@@ -70,67 +84,107 @@ fn f32_to_s16(f: &[f32]) -> Vec<u8> {
     b
 }
 
-/// extract -> clean -> sentence_pack -> token-cap split
-fn compute_units(pdf_path: &str, synth: &synth::Synth) -> Result<Vec<String>> {
-    let pages = pdf::extract(pdf_path)?;
-    let mut paragraphs = vec![];
-    for spans in &pages {
-        if spans.is_empty() {
-            continue;
-        }
-        let body = clean::detect_body_size(spans);
-        for para in clean::page_paragraphs(spans, body * 0.85) {
-            paragraphs.push(para);
+// char budget is a proxy; split anything that actually exceeds the token cap
+fn token_split(text: &str, synth: &synth::Synth, out: &mut Vec<String>) {
+    if synth.phonemes_token_len(&synth.phonemize(text)) <= MAX_TOKENS {
+        out.push(text.to_string());
+        return;
+    }
+    let words: Vec<&str> = text.split_whitespace().collect();
+    if words.len() <= 1 {
+        out.push(text.to_string());
+        return;
+    }
+    let mid = words.len().div_ceil(2);
+    token_split(&words[..mid].join(" "), synth, out);
+    token_split(&words[mid..].join(" "), synth, out);
+}
+
+/// load -> chapters (split at headings) -> sentence_pack -> token-cap split.
+/// Headings are narrated and also mark chapter starts (unit index -> title).
+fn compute_plan(input: &str, synth: &synth::Synth) -> Result<Plan> {
+    let doc = source::load(input)?;
+    let title = doc.title.clone();
+    let author = doc.author.clone();
+
+    let mut chapters: Vec<(String, Vec<String>)> = vec![];
+    let mut cur_title = String::new();
+    let mut cur: Vec<String> = vec![];
+    for b in doc.blocks {
+        match b {
+            // only major headings (h1/h2) break chapters; minor ones just narrate
+            Block::Heading(level, t) if level <= 2 => {
+                if !cur.is_empty() {
+                    chapters.push((std::mem::take(&mut cur_title), std::mem::take(&mut cur)));
+                }
+                cur_title = t.clone();
+                cur.push(t); // narrate the heading too
+            }
+            Block::Heading(_, t) => cur.push(t),
+            Block::Para(p) => cur.push(p),
         }
     }
-    let chunks = chunk::sentence_pack(&paragraphs, 300);
-    // char budget is a proxy; split anything that actually exceeds the token cap
-    fn split(text: &str, synth: &synth::Synth, out: &mut Vec<String>) {
-        if synth.phonemes_token_len(&synth.phonemize(text)) <= MAX_TOKENS {
-            out.push(text.to_string());
-            return;
-        }
-        let words: Vec<&str> = text.split_whitespace().collect();
-        if words.len() <= 1 {
-            out.push(text.to_string());
-            return;
-        }
-        let mid = words.len().div_ceil(2);
-        split(&words[..mid].join(" "), synth, out);
-        split(&words[mid..].join(" "), synth, out);
+    if !cur.is_empty() {
+        chapters.push((cur_title, cur));
     }
+    if chapters.is_empty() {
+        bail!("no readable text found in {input}");
+    }
+
     let mut units = vec![];
-    for c in &chunks {
-        split(c, synth, &mut units);
+    let mut marks: Vec<(usize, String)> = vec![];
+    for (ctitle, paras) in &chapters {
+        let name = if ctitle.is_empty() {
+            title.clone().unwrap_or_else(|| "Start".into())
+        } else {
+            ctitle.clone()
+        };
+        marks.push((units.len(), name));
+        for c in chunk::sentence_pack(paras, 300) {
+            token_split(&c, synth, &mut units);
+        }
     }
-    println!(
-        "{} pages -> {} paragraphs -> {} chunks -> {} units",
-        pages.len(),
-        paragraphs.len(),
-        chunks.len(),
-        units.len()
-    );
-    Ok(units)
+    println!("{} chapters -> {} units", chapters.len(), units.len());
+    Ok(Plan {
+        units,
+        chapters: marks,
+        title,
+        author,
+    })
+}
+
+// ffmetadata escaping: =, ;, #, \ and newline get a leading backslash
+fn ffmeta_esc(s: &str) -> String {
+    let mut out = String::new();
+    for c in s.chars() {
+        if matches!(c, '=' | ';' | '#' | '\\' | '\n') {
+            out.push('\\');
+        }
+        out.push(if c == '\n' { ' ' } else { c });
+    }
+    out
 }
 
 fn main() -> Result<()> {
     let args: Vec<String> = std::env::args().collect();
     if args.len() < 2 {
-        eprintln!("usage: lector <input.pdf> [outDir=.] [voice=bm_george] [lang=a|b]");
+        eprintln!(
+            "usage: lector <book.pdf|.epub|.mobi|...> [outDir=.] [voice=bm_george] [lang=a|b]"
+        );
         std::process::exit(1);
     }
-    let pdf_path = fs::canonicalize(&args[1])?.to_string_lossy().into_owned();
+    let input = fs::canonicalize(&args[1])?.to_string_lossy().into_owned();
     let out_dir = args.get(2).cloned().unwrap_or_else(|| ".".into());
     let voice = args.get(3).cloned().unwrap_or_else(|| "bm_george".into());
     let lang = args.get(4).map(|s| s.as_str()).unwrap_or("b");
     let espeak_lang = if lang == "a" { "en-us" } else { "en-gb" };
 
-    let title = Path::new(&pdf_path)
+    let fname = Path::new(&input)
         .file_stem()
         .map(|s| s.to_string_lossy().into_owned())
         .unwrap_or_else(|| "book".into());
     let slug = {
-        let s = slugify(&title);
+        let s = slugify(&fname);
         if s.is_empty() {
             "book".into()
         } else {
@@ -142,7 +196,7 @@ fn main() -> Result<()> {
     fs::create_dir_all(&ckpt)?;
     let pcm_path = ckpt.join("audio.s16");
     let timed_path = ckpt.join("timed.jsonl");
-    let units_path = ckpt.join("units.json");
+    let plan_path = ckpt.join("plan.json");
 
     let mut synth = synth::Synth::new(
         asset("kokoro_dur.onnx").to_str().unwrap(),
@@ -153,16 +207,21 @@ fn main() -> Result<()> {
     )
     .context("init synth (run vendor or check assets/)")?;
 
-    // --- units: load checkpoint or compute ---
-    let units: Vec<String> = if units_path.exists() {
-        let u: Vec<String> = serde_json::from_str(&fs::read_to_string(&units_path)?)?;
-        println!("resuming: {} units (checkpoint)", u.len());
-        u
+    // --- plan: load checkpoint or compute ---
+    let plan: Plan = if plan_path.exists() {
+        let p: Plan = serde_json::from_str(&fs::read_to_string(&plan_path)?)?;
+        println!(
+            "resuming: {} units, {} chapters (checkpoint)",
+            p.units.len(),
+            p.chapters.len()
+        );
+        p
     } else {
-        let u = compute_units(&pdf_path, &synth)?;
-        fs::write(&units_path, serde_json::to_string(&u)?)?;
-        u
+        let p = compute_plan(&input, &synth)?;
+        fs::write(&plan_path, serde_json::to_string(&p)?)?;
+        p
     };
+    let units = &plan.units;
 
     // --- resume: replay committed units, make audio.s16 consistent ---
     let mut per_unit: Vec<Vec<Timed>> = vec![];
@@ -242,38 +301,61 @@ fn main() -> Result<()> {
     drop(pcm);
     println!();
 
-    // --- assemble: merged .ass + encode the streamed PCM ---
+    // --- assemble: karaoke .ass + chapter-tagged .m4b ---
     let merged = timing::merge_timed(&per_unit, &durations);
     let ass_path = Path::new(&out_dir).join(format!("{slug}.ass"));
     fs::write(&ass_path, ass::to_ass(&merged, 12))?;
 
-    let mp3_path = Path::new(&out_dir).join(format!("{slug}.mp3"));
+    // cumulative start time (seconds) per unit -> chapter timestamps
+    let mut cum = vec![0f64; units.len() + 1];
+    for i in 0..units.len() {
+        cum[i + 1] = cum[i] + durations[i];
+    }
+    let total = *cum.last().unwrap_or(&0.0);
+    let meta_path = ckpt.join("meta.ff");
+    fs::write(&meta_path, build_ffmeta(&plan, &cum, total))?;
+
+    // encode raw PCM + metadata -> m4b (ipod muxer: AAC + chapters + nav)
+    let m4b_path = Path::new(&out_dir).join(format!("{slug}.m4b"));
     let ff = Command::new("ffmpeg")
         .args(["-y", "-f", "s16le", "-ar", "24000", "-ac", "1", "-i"])
         .arg(&pcm_path)
-        .args(["-b:a", "64k"])
-        .arg(&mp3_path)
+        .args(["-f", "ffmetadata", "-i"])
+        .arg(&meta_path)
+        .args([
+            "-map",
+            "0:a",
+            "-map_metadata",
+            "1",
+            "-c:a",
+            "aac",
+            "-b:a",
+            "64k",
+            "-f",
+            "ipod",
+        ])
+        .arg(&m4b_path)
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .status();
     let audio_out = match ff {
-        Ok(s) if s.success() => mp3_path,
+        Ok(s) if s.success() => m4b_path,
         _ => {
-            // no ffmpeg: emit a .wav (header + PCM copy)
             let wav_path = Path::new(&out_dir).join(format!("{slug}.wav"));
             write_wav(&wav_path, &pcm_path, total_samples)?;
-            eprintln!("(ffmpeg unavailable; wrote .wav)");
+            eprintln!("(ffmpeg unavailable or failed; wrote .wav without chapters)");
             wav_path
         }
     };
 
     fs::remove_dir_all(&ckpt).ok();
-    let mins = total_samples as f64 / SR as f64 / 60.0;
+    let mins = total / 60.0;
     println!(
-        "done: {} + {} ({mins:.0} min, {} words)",
+        "done: {} + {} ({mins:.0} min, {} words, {} chapters)",
         audio_out.display(),
         ass_path.display(),
-        merged.len()
+        merged.len(),
+        plan.chapters.len()
     );
     println!(
         "play: mpv --sub-file={} {}",
@@ -281,6 +363,35 @@ fn main() -> Result<()> {
         audio_out.display()
     );
     Ok(())
+}
+
+/// FFMETADATA1 doc with global title/artist + one [CHAPTER] per heading.
+fn build_ffmeta(plan: &Plan, cum: &[f64], total: f64) -> String {
+    let mut m = String::from(";FFMETADATA1\n");
+    if let Some(t) = &plan.title {
+        m.push_str(&format!("title={}\n", ffmeta_esc(t)));
+    }
+    if let Some(a) = &plan.author {
+        m.push_str(&format!("artist={}\n", ffmeta_esc(a)));
+    }
+    let ms = |s: f64| (s * 1000.0) as i64;
+    for (i, (uidx, ctitle)) in plan.chapters.iter().enumerate() {
+        let start = ms(cum.get(*uidx).copied().unwrap_or(0.0));
+        let end = if i + 1 < plan.chapters.len() {
+            ms(cum.get(plan.chapters[i + 1].0).copied().unwrap_or(total))
+        } else {
+            ms(total)
+        };
+        if end <= start {
+            continue; // skip empty chapters (mp4 rejects zero/negative spans)
+        }
+        m.push_str("[CHAPTER]\nTIMEBASE=1/1000\n");
+        m.push_str(&format!(
+            "START={start}\nEND={end}\ntitle={}\n",
+            ffmeta_esc(ctitle)
+        ));
+    }
+    m
 }
 
 fn write_wav(out: &Path, pcm: &Path, total_samples: usize) -> Result<()> {
