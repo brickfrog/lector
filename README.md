@@ -1,8 +1,8 @@
 # lector
 
-Turn a book into a karaoke audiobook: a chaptered `.m4b` plus a word-synced
-`.ass` subtitle track. Play it in mpv (it renders the karaoke and exposes chapter
-nav) or any audiobook player.
+Turn a book into a read-along audiobook: a chaptered `.m4b` plus a word-synced
+`.ass` subtitle track that highlights each word as it's spoken. Play it in mpv
+(it renders the read-along text and exposes chapter nav) or any audiobook player.
 
 One static binary. Synthesis runs natively via onnxruntime, around four times
 faster than realtime, and long renders are resumable.
@@ -24,7 +24,7 @@ source -> Blocks (paragraphs + headings)
   EPUB: spine XHTML -> <p>/<h*> straight from the markup
 Blocks -> chapters at headings -> sentence units
   -> espeak-ng phonemes -> Kokoro (onnxruntime) -> waveform + per-phoneme durations
-  -> per-word timestamps -> stream PCM -> ffmpeg .m4b (AAC + chapters) + karaoke .ass
+  -> per-word timestamps -> stream PCM -> ffmpeg .m4b (AAC + chapters) + read-along .ass
 ```
 
 Word timing falls out of synthesis: the Kokoro duration model emits a frame

@@ -1,11 +1,11 @@
-//! lector — render a book into a chaptered karaoke audiobook (.m4b + .ass).
+//! lector — render a book into a chaptered read-along audiobook (.m4b + .ass).
 //!
 //!   lector <book.pdf|.epub|.mobi|...> [outDir=.] [voice=bm_george] [lang=a|b]
 //!
 //! source (PDF via pdftotext / EPUB natively / others via ebook-convert) ->
 //! Blocks -> chapters at headings -> sentence_pack -> Kokoro synth (onnxruntime,
 //! ~4x realtime) -> per-word timing from pred_dur -> stream PCM -> ffmpeg m4b
-//! (AAC + chapter markers) + karaoke .ass. Crash-safe: each unit's audio +
+//! (AAC + chapter markers) + read-along .ass. Crash-safe: each unit's audio +
 //! timings commit to a .ckpt dir as it finishes, so a re-run resumes instead of
 //! redoing hours.
 
@@ -335,7 +335,7 @@ fn main() -> Result<()> {
     drop(pcm);
     println!();
 
-    // --- assemble: karaoke .ass + chapter-tagged .m4b ---
+    // --- assemble: read-along .ass + chapter-tagged .m4b ---
     let merged = timing::merge_timed(&per_unit, &durations);
     let ass_path = Path::new(&out_dir).join(format!("{slug}.ass"));
     fs::write(&ass_path, ass::to_ass(&merged, 12))?;

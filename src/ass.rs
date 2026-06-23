@@ -1,4 +1,4 @@
-//! Render timed words to an ASS karaoke document. Port of the MoonBit core `ass`.
+//! Render timed words to an ASS read-along document (word-timed). Port of the MoonBit core `ass`.
 
 use crate::timing::{fmt_time, Timed};
 
@@ -54,7 +54,7 @@ fn round_cs(sec: f64) -> i64 {
     }
 }
 
-/// Render timed tokens to a full ASS karaoke document.
+/// Render timed tokens to a full ASS read-along document.
 pub fn to_ass(timed: &[Timed], max_words: usize) -> String {
     let mut out = String::from(HEADER);
     let words: Vec<String> = timed.iter().map(|t| t.text.clone()).collect();
