@@ -1,6 +1,8 @@
 //! lector — render a book into a chaptered read-along audiobook (.m4b + .ass).
 //!
-//!   lector <book.pdf|.epub|.mobi|...> [outDir=.] [voice=bm_george] [lang=a|b]
+//!   lector book.epub -o out/ --voice af_heart --speed 1.25
+//!   lector voices
+//!   lector --help
 //!
 //! source (PDF via pdftotext / EPUB natively / others via ebook-convert) ->
 //! Blocks -> chapters at headings -> sentence_pack -> Kokoro synth (onnxruntime,
@@ -19,6 +21,7 @@ mod synth;
 mod timing;
 
 use anyhow::{bail, Context, Result};
+use clap::{CommandFactory, Parser, Subcommand};
 use serde::{Deserialize, Serialize};
 use source::Block;
 use std::fs::{self, File, OpenOptions};
@@ -30,7 +33,79 @@ use timing::Timed;
 
 const SR: usize = 24000;
 const MAX_TOKENS: usize = 500; // Kokoro caps near 510 phoneme tokens
-const THREADS: usize = 8;
+const WPM: f64 = 170.0; // Kokoro's rough speaking rate, for estimates only
+
+#[derive(Parser)]
+#[command(
+    name = "lector",
+    version,
+    about = "Render a book into a chaptered read-along audiobook (.m4b + word-synced .ass)",
+    after_help = "Play the result with:  mpv --sub-file=out/book.ass out/book.m4b",
+    args_conflicts_with_subcommands = true
+)]
+struct Cli {
+    #[command(subcommand)]
+    command: Option<Cmd>,
+
+    /// Book to render (.pdf, .epub, .mobi, .azw3, .fb2, ...)
+    input: Option<PathBuf>,
+
+    /// Output directory
+    #[arg(short, long, default_value = ".", value_name = "DIR")]
+    out: PathBuf,
+
+    /// Kokoro voice (see `lector voices`)
+    #[arg(short, long, default_value = "bm_george", value_name = "NAME")]
+    voice: String,
+
+    /// espeak accent: "a" (en-us), "b" (en-gb), or any espeak voice id.
+    /// Default: inferred from the voice prefix
+    #[arg(short, long, value_name = "LANG")]
+    lang: Option<String>,
+
+    /// Speaking speed multiplier, 0.25-4.0 (pitch-preserving; subtitles and
+    /// chapters stay in sync)
+    #[arg(short, long, default_value_t = 1.0, value_name = "X")]
+    speed: f64,
+
+    /// AAC bitrate in kbit/s
+    #[arg(short, long, default_value_t = 64, value_name = "KBPS")]
+    bitrate: u32,
+
+    /// onnxruntime threads [default: all cores]
+    #[arg(short = 'j', long, value_name = "N")]
+    threads: Option<usize>,
+
+    /// Max words per read-along subtitle line
+    #[arg(long, default_value_t = 12, value_name = "N")]
+    line_words: usize,
+
+    /// Subtitle font
+    #[arg(long, default_value = "Georgia", value_name = "FONT")]
+    sub_font: String,
+
+    /// Subtitle font size (720p canvas)
+    #[arg(long, default_value_t = 40, value_name = "PT")]
+    sub_size: u32,
+
+    /// Skip embedding cover art
+    #[arg(long)]
+    no_cover: bool,
+
+    /// Keep the checkpoint dir after a successful render
+    #[arg(long)]
+    keep_checkpoint: bool,
+
+    /// Parse and plan only: print the chapter breakdown and exit
+    #[arg(long)]
+    dry_run: bool,
+}
+
+#[derive(Subcommand)]
+enum Cmd {
+    /// List installed voices
+    Voices,
+}
 
 #[derive(Serialize, Deserialize)]
 struct Rec {
@@ -45,6 +120,10 @@ struct Plan {
     chapters: Vec<(usize, String)>, // (unit index where the chapter starts, title)
     title: Option<String>,
     author: Option<String>,
+    #[serde(default)]
+    voice: String,
+    #[serde(default)]
+    lang: String,
 }
 
 fn slugify(s: &str) -> String {
@@ -62,10 +141,46 @@ fn slugify(s: &str) -> String {
     out.trim_matches('-').to_string()
 }
 
-fn list_voices() {
-    let dir = asset("");
+/// Kokoro voice naming: `<lang><gender>_<name>` (af_heart, bm_george, ...).
+fn describe_voice(name: &str) -> String {
+    let mut c = name.chars();
+    let lang = match c.next() {
+        Some('a') => "American English",
+        Some('b') => "British English",
+        Some('e') => "Spanish",
+        Some('f') => "French",
+        Some('h') => "Hindi",
+        Some('i') => "Italian",
+        Some('j') => "Japanese",
+        Some('p') => "Brazilian Portuguese",
+        Some('z') => "Mandarin",
+        _ => return String::new(),
+    };
+    match c.next() {
+        Some('f') => format!("{lang}, female"),
+        Some('m') => format!("{lang}, male"),
+        _ => String::new(),
+    }
+}
+
+/// espeak voice for a Kokoro voice prefix, when --lang isn't given.
+fn infer_lang(voice: &str) -> &'static str {
+    match voice.chars().next() {
+        Some('a') => "en-us",
+        Some('e') => "es",
+        Some('f') => "fr-fr",
+        Some('h') => "hi",
+        Some('i') => "it",
+        Some('j') => "ja",
+        Some('p') => "pt-br",
+        Some('z') => "cmn",
+        _ => "en-gb",
+    }
+}
+
+fn installed_voices() -> Vec<String> {
     let mut v: Vec<String> = vec![];
-    if let Ok(rd) = fs::read_dir(&dir) {
+    if let Ok(rd) = fs::read_dir(asset("")) {
         for e in rd.flatten() {
             let p = e.path();
             if p.extension().is_some_and(|x| x == "bin") {
@@ -76,13 +191,24 @@ fn list_voices() {
         }
     }
     v.sort();
+    v
+}
+
+fn list_voices() {
+    let dir = asset("");
+    let v = installed_voices();
     if v.is_empty() {
         println!("no voices in {} (run: just vendor)", dir.display());
-    } else {
-        println!("voices in {}:", dir.display());
-        for n in v {
-            println!("  {n}");
+        return;
+    }
+    let w = v.iter().map(|n| n.len()).max().unwrap_or(0);
+    println!("voices in {}:", dir.display());
+    for n in &v {
+        let mut desc = describe_voice(n);
+        if n == "bm_george" {
+            desc.push_str(" (default)");
         }
+        println!("  {n:w$}  {}", desc.trim());
     }
 }
 
@@ -124,19 +250,14 @@ fn token_split(text: &str, synth: &synth::Synth, out: &mut Vec<String>) {
     token_split(&words[mid..].join(" "), synth, out);
 }
 
-/// load -> chapters (split at headings) -> sentence_pack -> token-cap split.
-/// Headings are narrated and also mark chapter starts (unit index -> title).
-fn compute_plan(input: &str, synth: &synth::Synth) -> Result<Plan> {
-    let doc = source::load(input)?;
-    let title = doc.title.clone();
-    let author = doc.author.clone();
-
+/// Group blocks into chapters: h1/h2 break chapters (and are narrated),
+/// minor headings just narrate.
+fn collect_chapters(blocks: Vec<Block>) -> Vec<(String, Vec<String>)> {
     let mut chapters: Vec<(String, Vec<String>)> = vec![];
     let mut cur_title = String::new();
     let mut cur: Vec<String> = vec![];
-    for b in doc.blocks {
+    for b in blocks {
         match b {
-            // only major headings (h1/h2) break chapters; minor ones just narrate
             Block::Heading(level, t) if level <= 2 => {
                 if !cur.is_empty() {
                     chapters.push((std::mem::take(&mut cur_title), std::mem::take(&mut cur)));
@@ -151,6 +272,16 @@ fn compute_plan(input: &str, synth: &synth::Synth) -> Result<Plan> {
     if !cur.is_empty() {
         chapters.push((cur_title, cur));
     }
+    chapters
+}
+
+/// load -> chapters (split at headings) -> sentence_pack -> token-cap split.
+/// Headings are narrated and also mark chapter starts (unit index -> title).
+fn compute_plan(input: &str, synth: &synth::Synth, voice: &str, lang: &str) -> Result<Plan> {
+    let doc = source::load(input)?;
+    let title = doc.title.clone();
+    let author = doc.author.clone();
+    let chapters = collect_chapters(doc.blocks);
     if chapters.is_empty() {
         bail!("no readable text found in {input}");
     }
@@ -174,7 +305,74 @@ fn compute_plan(input: &str, synth: &synth::Synth) -> Result<Plan> {
         chapters: marks,
         title,
         author,
+        voice: voice.to_string(),
+        lang: lang.to_string(),
     })
+}
+
+/// Print the chapter breakdown without synthesizing anything.
+fn dry_run(input: &str, speed: f64) -> Result<()> {
+    let doc = source::load(input)?;
+    let chapters = collect_chapters(doc.blocks);
+    if chapters.is_empty() {
+        bail!("no readable text found in {input}");
+    }
+    if let Some(t) = &doc.title {
+        println!("title:  {t}");
+    }
+    if let Some(a) = &doc.author {
+        println!("author: {a}");
+    }
+    let mut total_words = 0usize;
+    println!();
+    for (i, (title, paras)) in chapters.iter().enumerate() {
+        let words: usize = paras.iter().map(|p| p.split_whitespace().count()).sum();
+        total_words += words;
+        let name = if title.is_empty() {
+            "(untitled)"
+        } else {
+            title
+        };
+        println!(
+            "  {:>3}. {name}  ({words} words, ~{})",
+            i + 1,
+            fmt_dur(words as f64 / WPM * 60.0 / speed)
+        );
+    }
+    println!(
+        "\n{} chapters, {total_words} words, ~{} at {speed}x (dry run; nothing rendered)",
+        chapters.len(),
+        fmt_dur(total_words as f64 / WPM * 60.0 / speed)
+    );
+    Ok(())
+}
+
+/// "1h23m" / "17m" / "42s" — for estimates and progress, not timestamps.
+fn fmt_dur(secs: f64) -> String {
+    let s = secs.round() as i64;
+    if s >= 3600 {
+        format!("{}h{:02}m", s / 3600, (s % 3600) / 60)
+    } else if s >= 60 {
+        format!("{}m", s / 60)
+    } else {
+        format!("{s}s")
+    }
+}
+
+/// Decompose a speed into ffmpeg atempo stages (each stage must be in 0.5-2.0).
+fn atempo_chain(speed: f64) -> String {
+    let mut parts: Vec<String> = vec![];
+    let mut s = speed;
+    while s > 2.0 {
+        parts.push("atempo=2.0".into());
+        s /= 2.0;
+    }
+    while s < 0.5 {
+        parts.push("atempo=0.5".into());
+        s *= 2.0;
+    }
+    parts.push(format!("atempo={s}"));
+    parts.join(",")
 }
 
 // ffmetadata escaping: =, ;, #, \ and newline get a leading backslash
@@ -190,28 +388,47 @@ fn ffmeta_esc(s: &str) -> String {
 }
 
 fn main() -> Result<()> {
-    let args: Vec<String> = std::env::args().collect();
-    if args.len() < 2 {
-        eprintln!(
-            "usage: lector <book.pdf|.epub|.mobi|...> [outDir=.] [voice=bm_george] [lang=a|b]"
-        );
-        std::process::exit(1);
-    }
-    if args[1] == "voices" {
+    let cli = Cli::parse();
+    if let Some(Cmd::Voices) = cli.command {
         list_voices();
         return Ok(());
     }
-    let input = fs::canonicalize(&args[1])?.to_string_lossy().into_owned();
-    let out_dir = args.get(2).cloned().unwrap_or_else(|| ".".into());
-    let voice = args.get(3).cloned().unwrap_or_else(|| "bm_george".into());
-    // espeak accent: explicit arg wins, else inferred from the voice prefix
-    // (a* = American voices -> en-us, b* = British -> en-gb)
-    let espeak_lang = match args.get(4).map(|s| s.as_str()) {
-        Some("a") => "en-us",
-        Some("b") => "en-gb",
-        _ if voice.starts_with('a') => "en-us",
-        _ => "en-gb",
+    let Some(input) = &cli.input else {
+        Cli::command().print_help().ok();
+        std::process::exit(2)
     };
+    if !(0.25..=4.0).contains(&cli.speed) {
+        bail!("--speed must be within 0.25-4.0 (got {})", cli.speed);
+    }
+    let input = fs::canonicalize(input)
+        .with_context(|| format!("no such file: {}", input.display()))?
+        .to_string_lossy()
+        .into_owned();
+
+    if cli.dry_run {
+        return dry_run(&input, cli.speed);
+    }
+
+    let voice = &cli.voice;
+    let espeak_lang: String = match cli.lang.as_deref() {
+        Some("a") => "en-us".into(),
+        Some("b") => "en-gb".into(),
+        Some(other) => other.into(),
+        None => infer_lang(voice).into(),
+    };
+    let voice_bin = asset(&format!("{voice}.bin"));
+    if !voice_bin.exists() {
+        let have = installed_voices();
+        if have.is_empty() {
+            bail!("voice '{voice}' not found and no voices installed (run: just vendor)");
+        }
+        bail!("voice '{voice}' not found; installed: {}", have.join(", "));
+    }
+    let threads = cli.threads.unwrap_or_else(|| {
+        std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(8)
+    });
 
     let fname = Path::new(&input)
         .file_stem()
@@ -225,25 +442,42 @@ fn main() -> Result<()> {
             s
         }
     };
-    fs::create_dir_all(&out_dir)?;
-    let ckpt = Path::new(&out_dir).join(format!(".{slug}.ckpt"));
+    let out_dir = &cli.out;
+    fs::create_dir_all(out_dir)?;
+    let ckpt = out_dir.join(format!(".{slug}.ckpt"));
     fs::create_dir_all(&ckpt)?;
     let pcm_path = ckpt.join("audio.s16");
     let timed_path = ckpt.join("timed.jsonl");
     let plan_path = ckpt.join("plan.json");
 
+    println!(
+        "{fname} -> {}  [voice {voice} ({espeak_lang}), speed {}x, {} threads]",
+        out_dir.join(format!("{slug}.m4b")).display(),
+        cli.speed,
+        threads
+    );
+
     let mut synth = synth::Synth::new(
         asset("kokoro_dur.onnx").to_str().unwrap(),
         asset("tokenizer.json").to_str().unwrap(),
-        asset(&format!("{voice}.bin")).to_str().unwrap(),
-        espeak_lang,
-        THREADS,
+        voice_bin.to_str().unwrap(),
+        &espeak_lang,
+        threads,
     )
     .context("init synth (run vendor or check assets/)")?;
 
     // --- plan: load checkpoint or compute ---
     let plan: Plan = if plan_path.exists() {
         let p: Plan = serde_json::from_str(&fs::read_to_string(&plan_path)?)?;
+        if !p.voice.is_empty() && (&p.voice, &p.lang) != (voice, &espeak_lang) {
+            bail!(
+                "checkpoint {} was rendered with voice {} ({}); re-run with those \
+                 or delete the checkpoint to start over",
+                ckpt.display(),
+                p.voice,
+                p.lang
+            );
+        }
         println!(
             "resuming: {} units, {} chapters (checkpoint)",
             p.units.len(),
@@ -251,7 +485,7 @@ fn main() -> Result<()> {
         );
         p
     } else {
-        let p = compute_plan(&input, &synth)?;
+        let p = compute_plan(&input, &synth, voice, &espeak_lang)?;
         fs::write(&plan_path, serde_json::to_string(&p)?)?;
         p
     };
@@ -303,30 +537,34 @@ fn main() -> Result<()> {
     let t0 = Instant::now();
     let start_samples = total_samples;
     for i in done..units.len() {
-        let (wav, dur, phonemes, words, word_phonemes) = synth.synth(&units[i])?;
-        let timed = timing::align_words(&words, &word_phonemes, &phonemes, &dur);
-        pcm.write_all(&f32_to_s16(&wav))?;
+        let u = synth.synth(&units[i])?;
+        let timed = timing::align_words(&u.words, &u.word_phonemes, &u.phonemes, &u.dur);
+        pcm.write_all(&f32_to_s16(&u.wav))?;
         pcm.flush()?;
         let rec = Rec {
-            samples: wav.len(),
+            samples: u.wav.len(),
             timed: timed.clone(),
         };
         writeln!(tlog, "{}", serde_json::to_string(&rec)?)?;
         per_unit.push(timed);
-        durations.push(wav.len() as f64 / SR as f64);
-        total_samples += wav.len();
+        durations.push(u.wav.len() as f64 / SR as f64);
+        total_samples += u.wav.len();
         if i.is_multiple_of(10) || i == units.len() - 1 {
             let audio_min = total_samples as f64 / SR as f64 / 60.0;
             let run_audio = (total_samples - start_samples) as f64 / SR as f64;
+            let elapsed = t0.elapsed().as_secs_f64();
             let rtf = if run_audio > 0.0 {
-                t0.elapsed().as_secs_f64() / run_audio
+                elapsed / run_audio
             } else {
                 0.0
             };
+            let done_run = (i + 1 - done) as f64;
+            let eta = elapsed / done_run * (units.len() - i - 1) as f64;
             print!(
-                "\r  unit {}/{}  audio {audio_min:.0}min  RTF {rtf:.2}x   ",
+                "\r  unit {}/{}  audio {audio_min:.0}min  RTF {rtf:.2}x  ETA {}   ",
                 i + 1,
-                units.len()
+                units.len(),
+                fmt_dur(eta)
             );
             std::io::stdout().flush().ok();
         }
@@ -335,23 +573,26 @@ fn main() -> Result<()> {
     drop(pcm);
     println!();
 
-    // --- assemble: read-along .ass + chapter-tagged .m4b ---
-    let merged = timing::merge_timed(&per_unit, &durations);
-    let ass_path = Path::new(&out_dir).join(format!("{slug}.ass"));
-    fs::write(&ass_path, ass::to_ass(&merged, 12))?;
-
+    // --- assemble: chapter-tagged .m4b (speed applied here) + read-along .ass ---
     // cumulative start time (seconds) per unit -> chapter timestamps
     let mut cum = vec![0f64; units.len() + 1];
     for i in 0..units.len() {
         cum[i + 1] = cum[i] + durations[i];
     }
     let total = *cum.last().unwrap_or(&0.0);
+    // output timeline is shrunk/stretched by atempo; keep chapters + subs in sync
+    let out_cum: Vec<f64> = cum.iter().map(|t| t / cli.speed).collect();
+    let out_total = total / cli.speed;
     let meta_path = ckpt.join("meta.ff");
-    fs::write(&meta_path, build_ffmeta(&plan, &cum, total))?;
-    let cover = source::write_cover(&input, &ckpt);
+    fs::write(&meta_path, build_ffmeta(&plan, &out_cum, out_total))?;
+    let cover = if cli.no_cover {
+        None
+    } else {
+        source::write_cover(&input, &ckpt)
+    };
 
     // encode raw PCM + metadata (+ cover) -> m4b (ipod muxer: AAC + chapters + nav)
-    let m4b_path = Path::new(&out_dir).join(format!("{slug}.m4b"));
+    let m4b_path = out_dir.join(format!("{slug}.m4b"));
     let mut cmd = Command::new("ffmpeg");
     cmd.args(["-y", "-f", "s16le", "-ar", "24000", "-ac", "1", "-i"])
         .arg(&pcm_path)
@@ -364,7 +605,11 @@ fn main() -> Result<()> {
     if cover.is_some() {
         cmd.args(["-map", "2:v"]);
     }
-    cmd.args(["-map_metadata", "1", "-c:a", "aac", "-b:a", "64k"]);
+    if cli.speed != 1.0 {
+        cmd.args(["-af", &atempo_chain(cli.speed)]);
+    }
+    cmd.args(["-map_metadata", "1", "-c:a", "aac", "-b:a"])
+        .arg(format!("{}k", cli.bitrate));
     if cover.is_some() {
         // cover as attached picture (album art), shown by mpv / audiobook players
         cmd.args(["-c:v", "mjpeg", "-disposition:v", "attached_pic"]);
@@ -375,22 +620,41 @@ fn main() -> Result<()> {
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .status();
-    let audio_out = match ff {
-        Ok(s) if s.success() => m4b_path,
+    let (audio_out, out_speed) = match ff {
+        Ok(s) if s.success() => (m4b_path, cli.speed),
         _ => {
-            let wav_path = Path::new(&out_dir).join(format!("{slug}.wav"));
+            // fallback wav is the raw 1.0x PCM, so subs must stay at 1.0x too
+            let wav_path = out_dir.join(format!("{slug}.wav"));
             write_wav(&wav_path, &pcm_path, total_samples)?;
             eprintln!("(ffmpeg unavailable or failed; wrote .wav without chapters)");
-            wav_path
+            if cli.speed != 1.0 {
+                eprintln!("(--speed needs ffmpeg; .wav is at 1.0x)");
+            }
+            (wav_path, 1.0)
         }
     };
 
-    fs::remove_dir_all(&ckpt).ok();
-    let mins = total / 60.0;
+    let mut merged = timing::merge_timed(&per_unit, &durations);
+    for t in &mut merged {
+        t.start_s /= out_speed;
+        t.end_s /= out_speed;
+    }
+    let ass_path = out_dir.join(format!("{slug}.ass"));
+    fs::write(
+        &ass_path,
+        ass::to_ass(&merged, cli.line_words, &cli.sub_font, cli.sub_size),
+    )?;
+
+    if cli.keep_checkpoint {
+        println!("checkpoint kept: {}", ckpt.display());
+    } else {
+        fs::remove_dir_all(&ckpt).ok();
+    }
     println!(
-        "done: {} + {} ({mins:.0} min, {} words, {} chapters)",
+        "done: {} + {} ({}, {} words, {} chapters)",
         audio_out.display(),
         ass_path.display(),
+        fmt_dur(total / out_speed),
         merged.len(),
         plan.chapters.len()
     );

@@ -13,6 +13,15 @@ fn oe<E: std::fmt::Display>(e: E) -> anyhow::Error {
     anyhow!("ort: {e}")
 }
 
+/// One synthesized unit: the waveform plus everything alignment needs.
+pub struct Unit {
+    pub wav: Vec<f32>, // f32 @ 24kHz
+    pub dur: Vec<i64>, // per-phoneme pred_dur frames
+    pub phonemes: String,
+    pub words: Vec<String>,
+    pub word_phonemes: Vec<String>,
+}
+
 pub struct Synth {
     session: Session,
     vocab: HashMap<String, i64>,
@@ -52,8 +61,10 @@ impl Synth {
         }
         let bytes = std::fs::read(voice_bin)?;
         let voice: Vec<f32> = bytes
-            .chunks_exact(4)
-            .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .map(|c| f32::from_le_bytes(*c))
             .collect();
         let session = Session::builder()
             .map_err(oe)?
@@ -97,12 +108,8 @@ impl Synth {
         out
     }
 
-    /// Synthesize one unit. Returns (waveform f32@24k, pred_dur, phonemes, words,
-    /// word_phonemes) so the caller can run alignment.
-    pub fn synth(
-        &mut self,
-        text: &str,
-    ) -> Result<(Vec<f32>, Vec<i64>, String, Vec<String>, Vec<String>)> {
+    /// Synthesize one unit; everything the caller needs to run alignment.
+    pub fn synth(&mut self, text: &str) -> Result<Unit> {
         let phonemes = phonemize(text, &self.lang);
         let words: Vec<String> = text.split_whitespace().map(|s| s.to_string()).collect();
         let word_phonemes = self.word_phonemes(&words);
@@ -138,6 +145,12 @@ impl Synth {
         let (_, dur) = outputs["duration"]
             .try_extract_tensor::<i64>()
             .map_err(oe)?;
-        Ok((wav.to_vec(), dur.to_vec(), phonemes, words, word_phonemes))
+        Ok(Unit {
+            wav: wav.to_vec(),
+            dur: dur.to_vec(),
+            phonemes,
+            words,
+            word_phonemes,
+        })
     }
 }

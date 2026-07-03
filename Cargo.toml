@@ -5,6 +5,7 @@ edition = "2021"
 
 [dependencies]
 anyhow = "1.0.102"
+clap = { version = "4", features = ["derive", "wrap_help"] }
 epub = "2.1.5"
 ort = "2.0.0-rc.12"
 scraper = "0.27.0"

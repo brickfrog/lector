@@ -36,14 +36,14 @@ show it).
 
 ## Voices
 
-Pass any vendored Kokoro voice as the 3rd argument; `just vendor` fetches a
-spread (American/British, female/male). The espeak accent is inferred from the
-voice prefix (`a*` -> en-us, `b*` -> en-gb) unless you pass the 4th arg.
+Pass any vendored Kokoro voice with `--voice`; `just vendor` fetches a spread
+(American/British, female/male). The espeak accent is inferred from the voice
+prefix (`a*` -> en-us, `b*` -> en-gb, `e*` -> es, ...) unless you pass `--lang`.
 
 ```
-lector voices                       # list installed voices
-lector book.epub out/ af_heart      # American female
-lector book.epub out/ bm_lewis      # British male
+lector voices                            # list installed voices
+lector book.epub -o out/ -v af_heart     # American female
+lector book.epub -o out/ -v bm_lewis     # British male
 ```
 
 Any voice from the Kokoro-82M ONNX repo works: drop its `<name>.bin` in `assets/`.
@@ -65,8 +65,26 @@ just render path/to/book.epub out/        # -> out/book.m4b + out/book.ass
 mpv --sub-file=out/book.ass out/book.m4b
 ```
 
-`lector <book.pdf|.epub|.mobi|...> [outDir=.] [voice=bm_george] [lang=a|b]`
-(a = en-us, b = en-gb).
+```
+lector [OPTIONS] <book.pdf|.epub|.mobi|...>
+
+  -o, --out <DIR>        output directory                     [default: .]
+  -v, --voice <NAME>     Kokoro voice (see `lector voices`)   [default: bm_george]
+  -l, --lang <LANG>      espeak accent: a, b, or an espeak id [default: from voice]
+  -s, --speed <X>        speed multiplier, 0.25-4.0           [default: 1.0]
+  -b, --bitrate <KBPS>   AAC bitrate                          [default: 64]
+  -j, --threads <N>      onnxruntime threads                  [default: all cores]
+      --line-words <N>   max words per subtitle line          [default: 12]
+      --sub-font/--sub-size   subtitle style                  [default: Georgia/40]
+      --no-cover         skip embedding cover art
+      --keep-checkpoint  keep the .ckpt dir after success
+      --dry-run          print the chapter breakdown and exit
+```
+
+`--speed` is pitch-preserving (ffmpeg `atempo`); subtitle timings and chapter
+markers are scaled to match, so read-along sync survives any speed. `--dry-run`
+is a cheap way to sanity-check chapter detection (and see an estimated length)
+before committing to hours of synthesis.
 
 ## Resumable
 

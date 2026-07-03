@@ -60,10 +60,7 @@ pub fn align_words(
             break;
         }
         let s = left as f64 / magic;
-        let mut dur: i64 = 0;
-        for k in i..j {
-            dur += pred_dur[k];
-        }
+        let dur: i64 = pred_dur[i..j].iter().sum();
         let has_space = gi < g - 1;
         let space = if has_space { pred_dur[j] } else { 0 };
         left = right + 2 * dur + space;

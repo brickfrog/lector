@@ -2,7 +2,9 @@
 
 use crate::timing::{fmt_time, Timed};
 
-const HEADER: &str = "[Script Info]\nScriptType: v4.00+\nPlayResX: 1280\nPlayResY: 720\nWrapStyle: 0\n\n[V4+ Styles]\nFormat: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding\nStyle: Read,Georgia,40,&H0000FFFF,&H80AAAAAA,&H00000000,&H64000000,0,0,0,0,100,100,0,0,1,2,1,2,80,80,60,1\n\n[Events]\nFormat: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\n";
+fn header(font: &str, size: u32) -> String {
+    format!("[Script Info]\nScriptType: v4.00+\nPlayResX: 1280\nPlayResY: 720\nWrapStyle: 0\n\n[V4+ Styles]\nFormat: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding\nStyle: Read,{font},{size},&H0000FFFF,&H80AAAAAA,&H00000000,&H64000000,0,0,0,0,100,100,0,0,1,2,1,2,80,80,60,1\n\n[Events]\nFormat: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\n")
+}
 
 fn ends_sentence(w: &str) -> bool {
     let enders = ['.', '!', '?', ':', ';'];
@@ -55,8 +57,8 @@ fn round_cs(sec: f64) -> i64 {
 }
 
 /// Render timed tokens to a full ASS read-along document.
-pub fn to_ass(timed: &[Timed], max_words: usize) -> String {
-    let mut out = String::from(HEADER);
+pub fn to_ass(timed: &[Timed], max_words: usize, font: &str, size: u32) -> String {
+    let mut out = header(font, size);
     let words: Vec<String> = timed.iter().map(|t| t.text.clone()).collect();
     let lines = split_lines(&words, max_words);
     let mut wi = 0usize;

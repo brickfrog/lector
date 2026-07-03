@@ -92,9 +92,9 @@ pub fn detect_body_size(spans: &[Span]) -> f64 {
     }
     let mut best = 16usize;
     let mut best_c = -1i64;
-    for k in 0..256 {
-        if counts[k] > best_c {
-            best_c = counts[k];
+    for (k, &c) in counts.iter().enumerate() {
+        if c > best_c {
+            best_c = c;
             best = k;
         }
     }
