@@ -41,7 +41,8 @@ fn escape(w: &str) -> String {
         .map(|c| match c {
             '{' => '(',
             '}' => ')',
-            '\n' => ' ',
+            '\n' | '\r' => ' ',
+            '\\' => '\u{ff3c}',
             other => other,
         })
         .collect()

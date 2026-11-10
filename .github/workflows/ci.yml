@@ -1,0 +1,32 @@
+name: Checks
+on:
+  push:
+  pull_request:
+  schedule:
+    - cron: '23 8 * * 1'
+permissions:
+  contents: read
+jobs:
+  rust:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        toolchain: [stable, "1.92.0"]
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+        with:
+          toolchain: ${{ matrix.toolchain }}
+          components: rustfmt, clippy
+      - run: sudo apt-get update && sudo apt-get install -y espeak-ng ffmpeg poppler-utils
+      - run: cargo fmt --check
+      - run: cargo clippy --locked --all-targets -- -D warnings
+      - run: cargo test --locked
+      - run: cargo test --locked -- --ignored
+      - run: python3 -m unittest discover -s scripts -p 'test_*.py'
+      - if: matrix.toolchain == 'stable'
+        run: cargo install cargo-audit --locked
+      - if: matrix.toolchain == 'stable'
+        run: cargo audit
+      - if: matrix.toolchain == 'stable'
+        run: python3 scripts/audit.py

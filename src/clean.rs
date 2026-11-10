@@ -16,7 +16,7 @@ const INDENT_EPS: f64 = 4.0;
 const LINE_TOL: f64 = 4.0;
 
 fn is_ws(c: char) -> bool {
-    c == ' ' || c == '\n' || c == '\t' || c == '\r'
+    c.is_whitespace()
 }
 
 /// Collapse whitespace runs to single spaces, trim ends.
@@ -103,11 +103,7 @@ pub fn detect_body_size(spans: &[Span]) -> f64 {
 
 fn sorted_by_yx(spans: &[Span]) -> Vec<Span> {
     let mut r: Vec<Span> = spans.to_vec();
-    r.sort_by(|a, b| {
-        a.y.partial_cmp(&b.y)
-            .unwrap()
-            .then(a.x.partial_cmp(&b.x).unwrap())
-    });
+    r.sort_by(|a, b| a.y.total_cmp(&b.y).then(a.x.total_cmp(&b.x)));
     r
 }
 

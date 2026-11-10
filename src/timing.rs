@@ -155,3 +155,33 @@ pub fn merge_timed(units: &[Vec<Timed>], durations: &[f64]) -> Vec<Timed> {
     }
     out
 }
+
+/// Conventional grouped subtitles, useful outside ASS-capable players.
+pub fn to_srt(timed: &[Timed], max_words: usize) -> String {
+    let stamp = |seconds: f64| {
+        let ms = (seconds.max(0.0) * 1000.0).round() as u64;
+        format!(
+            "{:02}:{:02}:{:02},{:03}",
+            ms / 3600000,
+            ms / 60000 % 60,
+            ms / 1000 % 60,
+            ms % 1000
+        )
+    };
+    let mut out = String::new();
+    for (i, words) in timed.chunks(max_words.max(1)).enumerate() {
+        let text = words
+            .iter()
+            .map(|w| w.text.replace(['\n', '\r'], " "))
+            .collect::<Vec<_>>()
+            .join(" ");
+        out.push_str(&format!(
+            "{}\n{} --> {}\n{}\n\n",
+            i + 1,
+            stamp(words[0].start_s),
+            stamp(words.last().unwrap().end_s),
+            text
+        ));
+    }
+    out
+}

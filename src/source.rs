@@ -2,7 +2,7 @@
 //! (paragraphs + headings). Downstream (chunk/synth/timing) only sees text;
 //! headings drive chapter markers.
 
-use anyhow::{bail, Result};
+use anyhow::{bail, Context, Result};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -43,6 +43,7 @@ pub fn write_cover(input: &str, dest_dir: &Path) -> Option<PathBuf> {
 }
 
 pub enum Block {
+    Chapter(String),     // navigation boundary; not narrated
     Heading(u8, String), // level 1..=3, title text
     Para(String),
 }
@@ -124,23 +125,20 @@ fn convert_then_epub(path: &str) -> Result<Doc> {
             path
         );
     }
-    let tmp = std::env::temp_dir().join(format!(
-        "lector-{}.epub",
-        Path::new(path)
-            .file_stem()
-            .unwrap_or_default()
-            .to_string_lossy()
-    ));
+    let temp = tempfile::Builder::new().prefix("lector-").tempdir()?;
+    let tmp = temp.path().join("converted.epub");
     let status = Command::new("ebook-convert")
         .arg(path)
         .arg(&tmp)
         .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status()?;
-    if !status.success() {
-        bail!("ebook-convert failed on {path}");
+        .output()?;
+    if !status.status.success() {
+        bail!(
+            "ebook-convert failed on {path}: {}",
+            String::from_utf8_lossy(&status.stderr)
+        );
     }
-    let doc = crate::epub::load(tmp.to_str().unwrap());
+    let doc = crate::epub::load(tmp.to_str().context("temporary path must be UTF-8")?);
     let _ = std::fs::remove_file(&tmp);
     doc
 }

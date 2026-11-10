@@ -12,6 +12,7 @@
 //! redoing hours.
 
 mod ass;
+mod checkpoint;
 mod chunk;
 mod clean;
 mod epub;
@@ -21,10 +22,10 @@ mod synth;
 mod timing;
 
 use anyhow::{bail, Context, Result};
-use clap::{CommandFactory, Parser, Subcommand};
+use clap::{Args, CommandFactory, FromArgMatches, Parser, Subcommand};
 use serde::{Deserialize, Serialize};
 use source::Block;
-use std::fs::{self, File, OpenOptions};
+use std::fs::{self, OpenOptions};
 use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -41,27 +42,24 @@ const WPM: f64 = 170.0; // Kokoro's rough speaking rate, for estimates only
     version,
     about = "Render a book into a chaptered read-along audiobook (.m4b + word-synced .ass)",
     after_help = "Play the result with:  mpv --sub-file=out/book.ass out/book.m4b",
-    args_conflicts_with_subcommands = true
+    subcommand_precedence_over_arg = true
 )]
 struct Cli {
     #[command(subcommand)]
     command: Option<Cmd>,
 
-    /// Book to render (.pdf, .epub, .mobi, .azw3, .fb2, ...)
-    input: Option<PathBuf>,
+    /// Asset directory (also LECTOR_ASSETS); overrides automatic discovery
+    #[arg(long, global = true, value_name = "DIR")]
+    assets: Option<PathBuf>,
+    #[command(flatten)]
+    render: RenderArgs,
+}
 
+#[derive(Args)]
+struct OutputArgs {
     /// Output directory
     #[arg(short, long, default_value = ".", value_name = "DIR")]
     out: PathBuf,
-
-    /// Kokoro voice (see `lector voices`)
-    #[arg(short, long, default_value = "bm_george", value_name = "NAME")]
-    voice: String,
-
-    /// espeak accent: "a" (en-us), "b" (en-gb), or any espeak voice id.
-    /// Default: inferred from the voice prefix
-    #[arg(short, long, value_name = "LANG")]
-    lang: Option<String>,
 
     /// Speaking speed multiplier, 0.25-4.0 (pitch-preserving; subtitles and
     /// chapters stay in sync)
@@ -71,10 +69,6 @@ struct Cli {
     /// AAC bitrate in kbit/s
     #[arg(short, long, default_value_t = 64, value_name = "KBPS")]
     bitrate: u32,
-
-    /// onnxruntime threads [default: all cores]
-    #[arg(short = 'j', long, value_name = "N")]
-    threads: Option<usize>,
 
     /// Max words per read-along subtitle line
     #[arg(long, default_value_t = 12, value_name = "N")]
@@ -92,19 +86,96 @@ struct Cli {
     #[arg(long)]
     no_cover: bool,
 
-    /// Keep the checkpoint dir after a successful render
+    /// Also export word timings as JSON and conventional SRT subtitles
+    #[arg(long)]
+    export_timings: bool,
+}
+
+#[derive(Args)]
+struct RenderArgs {
+    /// Book to render (.pdf, .epub, .mobi, .azw3, .fb2, ...)
+    input: Option<PathBuf>,
+
+    /// Kokoro voice (see `lector voices`)
+    #[arg(short, long, default_value = "bm_george", value_name = "NAME")]
+    voice: String,
+
+    /// espeak accent: "a" (en-us), "b" (en-gb), or any espeak voice id.
+    /// Default: inferred from the voice prefix
+    #[arg(short, long, value_name = "LANG")]
+    lang: Option<String>,
+
+    /// onnxruntime threads [default: all cores]
+    #[arg(short = 'j', long, value_name = "N")]
+    threads: Option<usize>,
+
+    /// Keep the checkpoint dir after a successful render (now the default)
     #[arg(long)]
     keep_checkpoint: bool,
+
+    /// Delete reusable audio/timings after successful encoding
+    #[arg(long, conflicts_with = "keep_checkpoint")]
+    discard_checkpoint: bool,
 
     /// Parse and plan only: print the chapter breakdown and exit
     #[arg(long)]
     dry_run: bool,
+
+    #[command(flatten)]
+    output: OutputArgs,
+    /// Include chapter numbers/ranges from --dry-run (e.g. 2-5,8)
+    #[arg(long)]
+    chapters: Option<String>,
+    /// Exclude chapter numbers/ranges (e.g. 1,9-12)
+    #[arg(long)]
+    exclude_chapters: Option<String>,
+    /// JSON dictionary mapping written words to spoken replacements
+    #[arg(long, value_name = "FILE")]
+    pronunciations: Option<PathBuf>,
+    #[arg(skip)]
+    preview_words: Option<usize>,
+}
+
+impl std::ops::Deref for RenderArgs {
+    type Target = OutputArgs;
+    fn deref(&self) -> &OutputArgs {
+        &self.output
+    }
 }
 
 #[derive(Subcommand)]
 enum Cmd {
     /// List installed voices
     Voices,
+    /// Check external tools, asset integrity and model compatibility
+    Doctor {
+        #[arg(short, long, default_value = "bm_george")]
+        voice: String,
+    },
+    /// Render a short audition (about 30 seconds at the default word limit)
+    Preview {
+        #[arg(long, default_value_t = 85, value_parser = clap::value_parser!(u32).range(1..))]
+        words: u32,
+        #[command(flatten)]
+        render: RenderArgs,
+    },
+    /// Export the extracted text for inspection, without loading the model
+    Inspect {
+        input: PathBuf,
+        /// Write plain text to a file instead of stdout
+        #[arg(short, long)]
+        out: Option<PathBuf>,
+        #[arg(long)]
+        chapters: Option<String>,
+        #[arg(long)]
+        exclude_chapters: Option<String>,
+    },
+    /// Encode a completed checkpoint without source book, model or eSpeak
+    Reencode {
+        checkpoint: PathBuf,
+        #[command(flatten)]
+        output: OutputArgs,
+    },
 }
 
 #[derive(Serialize, Deserialize)]
@@ -116,6 +187,8 @@ struct Rec {
 /// Deterministic render plan, cached in the checkpoint so resume is exact.
 #[derive(Serialize, Deserialize)]
 struct Plan {
+    #[serde(default)]
+    identity: Vec<String>,
     units: Vec<String>,
     chapters: Vec<(usize, String)>, // (unit index where the chapter starts, title)
     title: Option<String>,
@@ -212,16 +285,31 @@ fn list_voices() {
     }
 }
 
+static ASSET_DIR: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+
 fn asset(name: &str) -> PathBuf {
-    // assets live next to the executable's crate dir; resolve relative to CWD too
-    let exe_rel = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("assets")
-        .join(name);
-    if exe_rel.exists() {
-        exe_rel
-    } else {
-        Path::new("assets").join(name)
+    ASSET_DIR.get_or_init(|| discover_assets(None)).join(name)
+}
+
+fn discover_assets(explicit: Option<PathBuf>) -> PathBuf {
+    if let Some(path) = explicit.or_else(|| std::env::var_os("LECTOR_ASSETS").map(PathBuf::from)) {
+        return path;
     }
+    let mut candidates = vec![PathBuf::from("assets")];
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(parent) = exe.parent() {
+            candidates.push(parent.join("assets"));
+        }
+    }
+    if let Some(data) = std::env::var_os("XDG_DATA_HOME") {
+        candidates.push(PathBuf::from(data).join("lector/assets"));
+    } else if let Some(home) = std::env::var_os("HOME") {
+        candidates.push(PathBuf::from(home).join(".local/share/lector/assets"));
+    }
+    candidates
+        .into_iter()
+        .find(|p| p.is_dir())
+        .unwrap_or_else(|| PathBuf::from("assets"))
 }
 
 fn f32_to_s16(f: &[f32]) -> Vec<u8> {
@@ -235,19 +323,21 @@ fn f32_to_s16(f: &[f32]) -> Vec<u8> {
 }
 
 // char budget is a proxy; split anything that actually exceeds the token cap
-fn token_split(text: &str, synth: &synth::Synth, out: &mut Vec<String>) {
-    if synth.phonemes_token_len(&synth.phonemize(text)) <= MAX_TOKENS {
+fn token_split(text: &str, synth: &synth::Synth, out: &mut Vec<String>) -> Result<()> {
+    if synth.phonemes_token_len(&synth.phonemize(text)?) <= MAX_TOKENS {
         out.push(text.to_string());
-        return;
+        return Ok(());
     }
     let words: Vec<&str> = text.split_whitespace().collect();
     if words.len() <= 1 {
-        out.push(text.to_string());
-        return;
+        bail!(
+            "single word exceeds model token limit; shorten or replace it: {}",
+            text.chars().take(80).collect::<String>()
+        );
     }
     let mid = words.len().div_ceil(2);
-    token_split(&words[..mid].join(" "), synth, out);
-    token_split(&words[mid..].join(" "), synth, out);
+    token_split(&words[..mid].join(" "), synth, out)?;
+    token_split(&words[mid..].join(" "), synth, out)
 }
 
 /// Group blocks into chapters: h1/h2 break chapters (and are narrated),
@@ -258,6 +348,12 @@ fn collect_chapters(blocks: Vec<Block>) -> Vec<(String, Vec<String>)> {
     let mut cur: Vec<String> = vec![];
     for b in blocks {
         match b {
+            Block::Chapter(t) => {
+                if !cur.is_empty() {
+                    chapters.push((std::mem::take(&mut cur_title), std::mem::take(&mut cur)));
+                }
+                cur_title = t;
+            }
             Block::Heading(level, t) if level <= 2 => {
                 if !cur.is_empty() {
                     chapters.push((std::mem::take(&mut cur_title), std::mem::take(&mut cur)));
@@ -277,17 +373,28 @@ fn collect_chapters(blocks: Vec<Block>) -> Vec<(String, Vec<String>)> {
 
 /// load -> chapters (split at headings) -> sentence_pack -> token-cap split.
 /// Headings are narrated and also mark chapter starts (unit index -> title).
-fn compute_plan(input: &str, synth: &synth::Synth, voice: &str, lang: &str) -> Result<Plan> {
+fn compute_plan(
+    input: &str,
+    synth: &synth::Synth,
+    voice: &str,
+    lang: &str,
+    cli: &RenderArgs,
+) -> Result<Plan> {
     let doc = source::load(input)?;
     let title = doc.title.clone();
     let author = doc.author.clone();
-    let chapters = collect_chapters(doc.blocks);
+    let chapters = select_chapters(
+        collect_chapters(doc.blocks),
+        cli.chapters.as_deref(),
+        cli.exclude_chapters.as_deref(),
+    )?;
     if chapters.is_empty() {
         bail!("no readable text found in {input}");
     }
 
     let mut units = vec![];
     let mut marks: Vec<(usize, String)> = vec![];
+    let chapters = limit_preview(chapters, cli.preview_words);
     for (ctitle, paras) in &chapters {
         let name = if ctitle.is_empty() {
             title.clone().unwrap_or_else(|| "Start".into())
@@ -296,11 +403,12 @@ fn compute_plan(input: &str, synth: &synth::Synth, voice: &str, lang: &str) -> R
         };
         marks.push((units.len(), name));
         for c in chunk::sentence_pack(paras, 300) {
-            token_split(&c, synth, &mut units);
+            token_split(&c, synth, &mut units)?;
         }
     }
     println!("{} chapters -> {} units", chapters.len(), units.len());
     Ok(Plan {
+        identity: vec![],
         units,
         chapters: marks,
         title,
@@ -311,9 +419,14 @@ fn compute_plan(input: &str, synth: &synth::Synth, voice: &str, lang: &str) -> R
 }
 
 /// Print the chapter breakdown without synthesizing anything.
-fn dry_run(input: &str, speed: f64) -> Result<()> {
+fn dry_run(input: &str, cli: &RenderArgs) -> Result<()> {
     let doc = source::load(input)?;
-    let chapters = collect_chapters(doc.blocks);
+    let speed = cli.speed;
+    let chapters = select_chapters(
+        collect_chapters(doc.blocks),
+        cli.chapters.as_deref(),
+        cli.exclude_chapters.as_deref(),
+    )?;
     if chapters.is_empty() {
         bail!("no readable text found in {input}");
     }
@@ -382,17 +495,84 @@ fn ffmeta_esc(s: &str) -> String {
         if matches!(c, '=' | ';' | '#' | '\\' | '\n') {
             out.push('\\');
         }
-        out.push(if c == '\n' { ' ' } else { c });
+        out.push(if matches!(c, '\n' | '\r') { ' ' } else { c });
     }
     out
 }
 
 fn main() -> Result<()> {
-    let cli = Cli::parse();
-    if let Some(Cmd::Voices) = cli.command {
-        list_voices();
-        return Ok(());
+    let matches = Cli::command().get_matches();
+    if matches.subcommand_name().is_some() {
+        for id in matches.ids() {
+            if id != "assets"
+                && matches.value_source(id.as_str()) == Some(clap::parser::ValueSource::CommandLine)
+            {
+                bail!("place render/output options after the subcommand (only --assets is global)");
+            }
+        }
     }
+    let cli = Cli::from_arg_matches(&matches)?;
+    ASSET_DIR.set(discover_assets(cli.assets)).ok();
+    match cli.command {
+        Some(Cmd::Voices) => {
+            list_voices();
+            Ok(())
+        }
+        Some(Cmd::Doctor { voice }) => doctor(&voice),
+        Some(Cmd::Preview { words, mut render }) => {
+            render.preview_words = Some(words as usize);
+            run_render(render)
+        }
+        Some(Cmd::Inspect {
+            input,
+            out,
+            chapters,
+            exclude_chapters,
+        }) => {
+            let input = fs::canonicalize(input)?;
+            let doc = source::load(input.to_str().context("input path must be UTF-8")?)?;
+            let chapters = select_chapters(
+                collect_chapters(doc.blocks),
+                chapters.as_deref(),
+                exclude_chapters.as_deref(),
+            )?;
+            let text = chapters
+                .iter()
+                .flat_map(|(_, paras)| paras.iter())
+                .cloned()
+                .collect::<Vec<_>>()
+                .join("\n\n")
+                + "\n";
+            if let Some(out) = out {
+                fs::write(out, text)?;
+            } else {
+                print!("{text}");
+            }
+            Ok(())
+        }
+        Some(Cmd::Reencode { checkpoint, output }) => reencode(&checkpoint, &output),
+        None => run_render(cli.render),
+    }
+}
+
+fn validate_output(cli: &OutputArgs) -> Result<()> {
+    anyhow::ensure!(
+        (0.25..=4.0).contains(&cli.speed),
+        "--speed must be within 0.25-4.0"
+    );
+    anyhow::ensure!(
+        cli.line_words > 0 && cli.sub_size > 0 && cli.bitrate > 0,
+        "line words, font size and bitrate must be positive"
+    );
+    anyhow::ensure!(
+        !cli.sub_font.contains([',', '\n', '\r']),
+        "subtitle font cannot contain commas or newlines"
+    );
+    Ok(())
+}
+
+fn run_render(cli: RenderArgs) -> Result<()> {
+    validate_output(&cli)?;
     let Some(input) = &cli.input else {
         Cli::command().print_help().ok();
         std::process::exit(2)
@@ -402,13 +582,31 @@ fn main() -> Result<()> {
     }
     let input = fs::canonicalize(input)
         .with_context(|| format!("no such file: {}", input.display()))?
-        .to_string_lossy()
-        .into_owned();
+        .to_str()
+        .context("input path must be UTF-8")?
+        .to_string();
 
     if cli.dry_run {
-        return dry_run(&input, cli.speed);
+        return dry_run(&input, &cli);
     }
 
+    anyhow::ensure!(cli.threads != Some(0), "thread count must be positive");
+    anyhow::ensure!(
+        !cli.voice.is_empty()
+            && cli
+                .voice
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '_'),
+        "voice must be an installed voice name, not a path"
+    );
+    let encoder = Command::new("ffmpeg")
+        .arg("-version")
+        .output()
+        .context("ffmpeg is required; run lector doctor before rendering")?;
+    anyhow::ensure!(
+        encoder.status.success(),
+        "ffmpeg is not working; run lector doctor"
+    );
     let voice = &cli.voice;
     let espeak_lang: String = match cli.lang.as_deref() {
         Some("a") => "en-us".into(),
@@ -434,7 +632,7 @@ fn main() -> Result<()> {
         .file_stem()
         .map(|s| s.to_string_lossy().into_owned())
         .unwrap_or_else(|| "book".into());
-    let slug = {
+    let mut slug = {
         let s = slugify(&fname);
         if s.is_empty() {
             "book".into()
@@ -442,8 +640,12 @@ fn main() -> Result<()> {
             s
         }
     };
+    if cli.preview_words.is_some() {
+        slug.push_str("-preview");
+    }
     let out_dir = &cli.out;
     fs::create_dir_all(out_dir)?;
+    let _lock = checkpoint::lock(&out_dir.join(format!(".{slug}.lock")))?;
     let ckpt = out_dir.join(format!(".{slug}.ckpt"));
     fs::create_dir_all(&ckpt)?;
     let pcm_path = ckpt.join("audio.s16");
@@ -458,18 +660,47 @@ fn main() -> Result<()> {
     );
 
     let mut synth = synth::Synth::new(
-        asset("kokoro_dur.onnx").to_str().unwrap(),
-        asset("tokenizer.json").to_str().unwrap(),
-        voice_bin.to_str().unwrap(),
+        &asset("kokoro_dur.onnx"),
+        &asset("tokenizer.json"),
+        &voice_bin,
         &espeak_lang,
         threads,
     )
     .context("init synth (run vendor or check assets/)")?;
 
+    if let Some(path) = &cli.pronunciations {
+        synth.set_pronunciations(path)?;
+    }
+
+    // Content fingerprints prevent changed inputs/assets from mixing with cached audio.
+    let mut identity = vec!["lector-plan-v3".to_string()];
+    for path in [
+        PathBuf::from(&input),
+        asset("kokoro_dur.onnx"),
+        asset("tokenizer.json"),
+        voice_bin.clone(),
+    ] {
+        identity.push(checkpoint::digest(&path)?);
+    }
+    if let Some(path) = &cli.pronunciations {
+        identity.push(checkpoint::digest(path)?);
+    }
+    let espeak_version = Command::new("espeak-ng").arg("--version").output()?;
+    anyhow::ensure!(
+        espeak_version.status.success(),
+        "cannot determine espeak-ng version"
+    );
+    identity.push(format!(
+        "{:?}/{:?}/{:?}",
+        cli.chapters, cli.exclude_chapters, cli.preview_words
+    ));
+    identity.push(String::from_utf8_lossy(&espeak_version.stdout).into_owned());
+
     // --- plan: load checkpoint or compute ---
     let plan: Plan = if plan_path.exists() {
         let p: Plan = serde_json::from_str(&fs::read_to_string(&plan_path)?)?;
-        if !p.voice.is_empty() && (&p.voice, &p.lang) != (voice, &espeak_lang) {
+        anyhow::ensure!(p.identity == identity, "checkpoint {} belongs to different input/assets or an older version; use a different output directory or move the checkpoint aside", ckpt.display());
+        if (&p.voice, &p.lang) != (voice, &espeak_lang) {
             bail!(
                 "checkpoint {} was rendered with voice {} ({}); re-run with those \
                  or delete the checkpoint to start over",
@@ -485,40 +716,18 @@ fn main() -> Result<()> {
         );
         p
     } else {
-        let p = compute_plan(&input, &synth, voice, &espeak_lang)?;
-        fs::write(&plan_path, serde_json::to_string(&p)?)?;
+        let mut p = compute_plan(&input, &synth, voice, &espeak_lang, &cli)?;
+        p.identity = identity;
+        checkpoint::atomic_write(&plan_path, &serde_json::to_vec(&p)?)?;
         p
     };
     let units = &plan.units;
 
     // --- resume: replay committed units, make audio.s16 consistent ---
-    let mut per_unit: Vec<Vec<Timed>> = vec![];
-    let mut durations: Vec<f64> = vec![];
-    let mut total_samples: usize = 0;
-    if timed_path.exists() {
-        for line in fs::read_to_string(&timed_path)?.lines() {
-            if line.trim().is_empty() {
-                continue;
-            }
-            let rec: Rec = serde_json::from_str(line)?;
-            durations.push(rec.samples as f64 / SR as f64);
-            total_samples += rec.samples;
-            per_unit.push(rec.timed);
-        }
-    }
-    let done = per_unit.len();
-    let expected = (total_samples * 2) as u64;
-    if pcm_path.exists() {
-        let sz = fs::metadata(&pcm_path)?.len();
-        if sz > expected {
-            OpenOptions::new()
-                .write(true)
-                .open(&pcm_path)?
-                .set_len(expected)?; // drop partial tail
-        } else if sz < expected {
-            bail!("checkpoint inconsistent (audio < timings); delete {ckpt:?} to restart");
-        }
-    }
+    let records = checkpoint::recover(&ckpt, units.len())?;
+    let done = records.len();
+    let mut total_samples: usize = records.iter().map(|r| r.samples).sum();
+    drop(records);
     if done > 0 {
         println!("  {done}/{} units already done; continuing", units.len());
     }
@@ -534,6 +743,7 @@ fn main() -> Result<()> {
         .create(true)
         .append(true)
         .open(&timed_path)?;
+    checkpoint::sync_dir(&ckpt)?;
     let t0 = Instant::now();
     let start_samples = total_samples;
     for i in done..units.len() {
@@ -541,13 +751,13 @@ fn main() -> Result<()> {
         let timed = timing::align_words(&u.words, &u.word_phonemes, &u.phonemes, &u.dur);
         pcm.write_all(&f32_to_s16(&u.wav))?;
         pcm.flush()?;
+        pcm.get_ref().sync_data()?;
         let rec = Rec {
             samples: u.wav.len(),
-            timed: timed.clone(),
+            timed,
         };
         writeln!(tlog, "{}", serde_json::to_string(&rec)?)?;
-        per_unit.push(timed);
-        durations.push(u.wav.len() as f64 / SR as f64);
+        tlog.sync_data()?;
         total_samples += u.wav.len();
         if i.is_multiple_of(10) || i == units.len() - 1 {
             let audio_min = total_samples as f64 / SR as f64 / 60.0;
@@ -573,6 +783,63 @@ fn main() -> Result<()> {
     drop(pcm);
     println!();
 
+    assemble(&plan, &ckpt, &slug, &cli, Some(&input))?;
+    if cli.discard_checkpoint {
+        fs::remove_dir_all(&ckpt)?;
+    } else {
+        println!("checkpoint kept: {}", ckpt.display());
+    }
+    Ok(())
+}
+
+fn reencode(ckpt: &Path, cli: &OutputArgs) -> Result<()> {
+    validate_output(cli)?;
+    let ckpt = fs::canonicalize(ckpt)?;
+    let name = ckpt
+        .file_name()
+        .and_then(|s| s.to_str())
+        .context("invalid checkpoint name")?;
+    let slug = name
+        .strip_prefix('.')
+        .and_then(|s| s.strip_suffix(".ckpt"))
+        .context("expected .<book>.ckpt directory")?;
+    let parent = ckpt.parent().context("checkpoint has no parent")?;
+    let _source_lock = checkpoint::lock(&parent.join(format!(".{slug}.lock")))?;
+    fs::create_dir_all(&cli.out)?;
+    let _dest_lock = if fs::canonicalize(&cli.out)? != parent {
+        Some(checkpoint::lock(&cli.out.join(format!(".{slug}.lock")))?)
+    } else {
+        None
+    };
+    let plan: Plan = serde_json::from_slice(&fs::read(ckpt.join("plan.json"))?)?;
+    assemble(&plan, &ckpt, slug, cli, None)
+}
+
+fn assemble(
+    plan: &Plan,
+    ckpt: &Path,
+    slug: &str,
+    cli: &OutputArgs,
+    input: Option<&str>,
+) -> Result<()> {
+    let units = &plan.units;
+    anyhow::ensure!(
+        plan.chapters.iter().all(|(index, _)| *index < units.len())
+            && plan.chapters.windows(2).all(|pair| pair[0].0 < pair[1].0),
+        "checkpoint has invalid chapter boundaries"
+    );
+    let records = checkpoint::recover(ckpt, units.len())?;
+    anyhow::ensure!(
+        !units.is_empty() && records.len() == units.len(),
+        "checkpoint is incomplete; resume the original render first"
+    );
+    let per_unit: Vec<_> = records.iter().map(|r| r.timed.clone()).collect();
+    let durations: Vec<_> = records
+        .iter()
+        .map(|r| r.samples as f64 / SR as f64)
+        .collect();
+    let pcm_path = ckpt.join("audio.s16");
+    let out_dir = &cli.out;
     // --- assemble: chapter-tagged .m4b (speed applied here) + read-along .ass ---
     // cumulative start time (seconds) per unit -> chapter timestamps
     let mut cum = vec![0f64; units.len() + 1];
@@ -584,11 +851,18 @@ fn main() -> Result<()> {
     let out_cum: Vec<f64> = cum.iter().map(|t| t / cli.speed).collect();
     let out_total = total / cli.speed;
     let meta_path = ckpt.join("meta.ff");
-    fs::write(&meta_path, build_ffmeta(&plan, &out_cum, out_total))?;
+    fs::write(&meta_path, build_ffmeta(plan, &out_cum, out_total))?;
     let cover = if cli.no_cover {
         None
     } else {
-        source::write_cover(&input, &ckpt)
+        input
+            .and_then(|input| source::write_cover(input, ckpt))
+            .or_else(|| {
+                ["cover.png", "cover.jpg"]
+                    .into_iter()
+                    .map(|name| ckpt.join(name))
+                    .find(|p| p.exists())
+            })
     };
 
     // encode raw PCM + metadata (+ cover) -> m4b (ipod muxer: AAC + chapters + nav)
@@ -614,42 +888,52 @@ fn main() -> Result<()> {
         // cover as attached picture (album art), shown by mpv / audiobook players
         cmd.args(["-c:v", "mjpeg", "-disposition:v", "attached_pic"]);
     }
+    // Stage output in the destination filesystem; ffmpeg never touches a prior render.
+    let staged_audio = tempfile::NamedTempFile::new_in(out_dir)?;
     let ff = cmd
-        .args(["-f", "ipod"])
-        .arg(&m4b_path)
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status();
-    let (audio_out, out_speed) = match ff {
-        Ok(s) if s.success() => (m4b_path, cli.speed),
-        _ => {
-            // fallback wav is the raw 1.0x PCM, so subs must stay at 1.0x too
-            let wav_path = out_dir.join(format!("{slug}.wav"));
-            write_wav(&wav_path, &pcm_path, total_samples)?;
-            eprintln!("(ffmpeg unavailable or failed; wrote .wav without chapters)");
-            if cli.speed != 1.0 {
-                eprintln!("(--speed needs ffmpeg; .wav is at 1.0x)");
-            }
-            (wav_path, 1.0)
-        }
-    };
+        .args([
+            "-nostdin",
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-f",
+            "ipod",
+        ])
+        .arg(staged_audio.path())
+        .output()
+        .context("run ffmpeg; audio/timings were preserved in the checkpoint")?;
+    anyhow::ensure!(
+        ff.status.success(),
+        "ffmpeg failed; checkpoint preserved at {}: {}",
+        ckpt.display(),
+        String::from_utf8_lossy(&ff.stderr).trim()
+    );
+    staged_audio.as_file().sync_all()?;
+    let out_speed = cli.speed;
 
     let mut merged = timing::merge_timed(&per_unit, &durations);
     for t in &mut merged {
         t.start_s /= out_speed;
         t.end_s /= out_speed;
     }
-    let ass_path = out_dir.join(format!("{slug}.ass"));
-    fs::write(
-        &ass_path,
-        ass::to_ass(&merged, cli.line_words, &cli.sub_font, cli.sub_size),
-    )?;
-
-    if cli.keep_checkpoint {
-        println!("checkpoint kept: {}", ckpt.display());
-    } else {
-        fs::remove_dir_all(&ckpt).ok();
+    if cli.export_timings {
+        checkpoint::atomic_write(
+            &out_dir.join(format!("{slug}.json")),
+            &serde_json::to_vec_pretty(&merged)?,
+        )?;
+        checkpoint::atomic_write(
+            &out_dir.join(format!("{slug}.srt")),
+            timing::to_srt(&merged, cli.line_words).as_bytes(),
+        )?;
     }
+    let ass_path = out_dir.join(format!("{slug}.ass"));
+    let subtitles = ass::to_ass(&merged, cli.line_words, &cli.sub_font, cli.sub_size);
+    // Each artifact is atomically replaced. Checkpoint survives any publication error.
+    checkpoint::atomic_write(&ass_path, subtitles.as_bytes())?;
+    staged_audio.persist(&m4b_path).map_err(|e| e.error)?;
+    checkpoint::sync_dir(out_dir)?;
+    let audio_out = m4b_path;
+
     println!(
         "done: {} + {} ({}, {} words, {} chapters)",
         audio_out.display(),
@@ -695,23 +979,184 @@ fn build_ffmeta(plan: &Plan, cum: &[f64], total: f64) -> String {
     m
 }
 
-fn write_wav(out: &Path, pcm: &Path, total_samples: usize) -> Result<()> {
-    let data_len = (total_samples * 2) as u32;
-    let mut f = BufWriter::new(File::create(out)?);
-    f.write_all(b"RIFF")?;
-    f.write_all(&(36 + data_len).to_le_bytes())?;
-    f.write_all(b"WAVE")?;
-    f.write_all(b"fmt ")?;
-    f.write_all(&16u32.to_le_bytes())?;
-    f.write_all(&1u16.to_le_bytes())?;
-    f.write_all(&1u16.to_le_bytes())?;
-    f.write_all(&(SR as u32).to_le_bytes())?;
-    f.write_all(&((SR * 2) as u32).to_le_bytes())?;
-    f.write_all(&2u16.to_le_bytes())?;
-    f.write_all(&16u16.to_le_bytes())?;
-    f.write_all(b"data")?;
-    f.write_all(&data_len.to_le_bytes())?;
-    let mut r = File::open(pcm)?;
-    std::io::copy(&mut r, &mut f)?;
+fn chapter_set(spec: &str, count: usize) -> Result<std::collections::BTreeSet<usize>> {
+    let mut set = std::collections::BTreeSet::new();
+    for item in spec.split(',') {
+        let item = item.trim();
+        let (a, b) = item.split_once('-').unwrap_or((item, item));
+        let a: usize = a
+            .parse()
+            .context("chapter selection must use numbers or ranges, e.g. 2-5,8")?;
+        let b: usize = b.parse().context("invalid chapter range")?;
+        anyhow::ensure!(
+            a > 0 && a <= b && b <= count,
+            "chapter range {item} is outside 1-{count}"
+        );
+        set.extend(a..=b);
+    }
+    Ok(set)
+}
+
+fn select_chapters(
+    chapters: Vec<(String, Vec<String>)>,
+    include: Option<&str>,
+    exclude: Option<&str>,
+) -> Result<Vec<(String, Vec<String>)>> {
+    let count = chapters.len();
+    let keep = include.map(|s| chapter_set(s, count)).transpose()?;
+    let omit = exclude
+        .map(|s| chapter_set(s, count))
+        .transpose()?
+        .unwrap_or_default();
+    let result: Vec<_> = chapters
+        .into_iter()
+        .enumerate()
+        .filter(|(i, _)| {
+            let n = i + 1;
+            keep.as_ref().is_none_or(|set| set.contains(&n)) && !omit.contains(&n)
+        })
+        .map(|(_, chapter)| chapter)
+        .collect();
+    anyhow::ensure!(!result.is_empty(), "no readable chapters selected");
+    Ok(result)
+}
+
+fn limit_preview(
+    chapters: Vec<(String, Vec<String>)>,
+    limit: Option<usize>,
+) -> Vec<(String, Vec<String>)> {
+    let Some(mut remaining) = limit else {
+        return chapters;
+    };
+    let mut out = vec![];
+    for (title, paras) in chapters {
+        let mut chosen = vec![];
+        for p in paras {
+            if remaining == 0 {
+                break;
+            }
+            let words: Vec<_> = p.split_whitespace().take(remaining).collect();
+            remaining -= words.len();
+            chosen.push(words.join(" "));
+        }
+        if !chosen.is_empty() {
+            out.push((title, chosen));
+        }
+        if remaining == 0 {
+            break;
+        }
+    }
+    out
+}
+
+fn doctor(voice: &str) -> Result<()> {
+    let mut errors = vec![];
+    println!("assets: {}", asset("").display());
+    for (tool, arg, required) in [
+        ("espeak-ng", "--version", true),
+        ("ffmpeg", "-version", true),
+        ("pdftotext", "-v", false),
+        ("pdfinfo", "-v", false),
+        ("pdftoppm", "-v", false),
+        ("ebook-convert", "--version", false),
+    ] {
+        match Command::new(tool).arg(arg).output() {
+            Ok(out) if out.status.success() => println!("ok: {tool}"),
+            _ if required => errors.push(format!("missing or broken {tool}")),
+            _ => println!("optional: {tool} unavailable (PDF/Calibre support limited)"),
+        }
+    }
+    anyhow::ensure!(
+        voice.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') && !voice.is_empty(),
+        "invalid voice name"
+    );
+    let manifest: serde_json::Value = serde_json::from_str(include_str!("../scripts/assets.json"))?;
+    for entry in manifest["files"]
+        .as_array()
+        .context("invalid asset manifest")?
+    {
+        let path = entry["path"].as_str().context("invalid asset path")?;
+        let name = Path::new(path).file_name().unwrap().to_str().unwrap();
+        if name != "tokenizer.json" && name != format!("{voice}.bin") {
+            continue;
+        }
+        match checkpoint::digest(&asset(name)) {
+            Ok(sum) if Some(sum.as_str()) == entry["sha256"].as_str() => {
+                println!("ok: {name} checksum")
+            }
+            _ => errors.push(format!(
+                "{name} missing or differs from pinned asset; run scripts/vendor.py"
+            )),
+        }
+    }
+    let model_metadata = asset("kokoro_dur.json");
+    if model_metadata.exists() {
+        let metadata: serde_json::Value = serde_json::from_slice(&fs::read(model_metadata)?)?;
+        match checkpoint::digest(&asset("kokoro_dur.onnx")) {
+            Ok(sum) if Some(sum.as_str()) == metadata["sha256"].as_str() => {
+                println!("ok: model checksum")
+            }
+            _ => errors.push("model checksum differs from export metadata".into()),
+        }
+    } else {
+        println!("note: model has no export checksum sidecar; checking inference only");
+    }
+    if errors.is_empty() {
+        match synth::Synth::new(
+            &asset("kokoro_dur.onnx"),
+            &asset("tokenizer.json"),
+            &asset(&format!("{voice}.bin")),
+            infer_lang(voice),
+            1,
+        )
+        .and_then(|mut synth| synth.synth("Ready."))
+        {
+            Ok(unit) if !unit.wav.is_empty() && unit.wav.iter().all(|x| x.is_finite()) => {
+                println!("ok: model inference and duration output")
+            }
+            Ok(_) => errors.push("model returned invalid audio".into()),
+            Err(e) => errors.push(format!("model: {e:#}")),
+        }
+    }
+    anyhow::ensure!(
+        errors.is_empty(),
+        "doctor found problems:\n{}",
+        errors.join("\n")
+    );
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn chapter_ranges_and_preview_preserve_order() {
+        let chapters = vec![
+            ("one".into(), vec!["one two three".into()]),
+            ("two".into(), vec!["four five six".into()]),
+            ("three".into(), vec!["seven".into()]),
+        ];
+        let selected = select_chapters(chapters, Some("1-3"), Some("2")).unwrap();
+        let preview = limit_preview(selected, Some(4));
+        assert_eq!(preview[0].1, ["one two three"]);
+        assert_eq!(preview[1].1, ["seven"]);
+        assert!(chapter_set("0", 3).is_err());
+        assert!(chapter_set("3-1", 3).is_err());
+        assert!(chapter_set("1-4", 3).is_err());
+    }
+    #[test]
+    fn cli_structure_and_reencode_options() {
+        Cli::command().debug_assert();
+        assert!(Cli::try_parse_from(["lector", "--assets", "custom", "doctor"]).is_ok());
+        assert!(Cli::try_parse_from(["lector", "preview", "book.epub", "--words", "0"]).is_err());
+        assert!(
+            Cli::try_parse_from(["lector", "reencode", ".book.ckpt", "--voice", "af_heart"])
+                .is_err()
+        );
+    }
+    #[test]
+    fn tempo_stages_cover_extremes() {
+        assert_eq!(atempo_chain(0.25), "atempo=0.5,atempo=0.5");
+        assert_eq!(atempo_chain(4.0), "atempo=2.0,atempo=2");
+    }
 }

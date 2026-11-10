@@ -10,16 +10,14 @@ fn attr(line: &str, name: &str) -> Option<f64> {
     let i = line.find(&key)? + key.len();
     let rest = &line[i..];
     let j = rest.find('"')?;
-    rest[..j].parse().ok()
+    rest[..j].parse::<f64>().ok().filter(|v| v.is_finite())
 }
 
 fn unescape(s: &str) -> String {
-    s.replace("&amp;", "&")
-        .replace("&lt;", "<")
-        .replace("&gt;", ">")
-        .replace("&quot;", "\"")
-        .replace("&#39;", "'")
-        .replace("&apos;", "'")
+    scraper::Html::parse_fragment(s)
+        .root_element()
+        .text()
+        .collect()
 }
 
 /// Extract spans grouped by page. Coordinates are top-down (yMin from top).
@@ -28,6 +26,11 @@ pub fn extract(pdf: &str) -> Result<Vec<Vec<Span>>> {
         .args(["-bbox", pdf, "-"])
         .output()
         .context("pdftotext failed to run (is poppler installed?)")?;
+    anyhow::ensure!(
+        out.status.success(),
+        "pdftotext failed: {}",
+        String::from_utf8_lossy(&out.stderr).trim()
+    );
     let xml = String::from_utf8_lossy(&out.stdout);
     let mut pages: Vec<Vec<Span>> = vec![];
     let mut cur: Vec<Span> = vec![];
@@ -64,4 +67,16 @@ pub fn extract(pdf: &str) -> Result<Vec<Vec<Span>>> {
         pages.push(cur);
     }
     Ok(pages)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn entities_decode_once_including_numeric_unicode() {
+        assert_eq!(
+            unescape("A &amp; B &amp;lt; &#x2014; &lt;tag&gt;"),
+            "A & B &lt; — <tag>"
+        );
+    }
 }
